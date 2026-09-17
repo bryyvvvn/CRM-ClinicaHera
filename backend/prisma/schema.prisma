@@ -38,5 +38,6 @@ model Message {
   chatSession   ChatSession @relation(fields: [chatSessionId], references: [id], onDelete: Cascade)
   role          MessageRole
   content       String
+  externalId    String?     @unique
   createdAt     DateTime    @default(now())
 }
