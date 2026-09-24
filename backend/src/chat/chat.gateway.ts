@@ -12,7 +12,11 @@ import { ChatService } from './chat.service.js';
 import type { ChatMessageDto, ConversationDto } from './chat.types.js';
 
 type SocketClient = {
+  id: string;
+  rooms?: Set<string> | Iterable<string>;
   join: (room: string) => Promise<void> | void;
+  leave: (room: string) => Promise<void> | void;
+  emit: (event: string, payload: unknown) => void;
 };
 
 type SocketServer = {
@@ -46,9 +50,14 @@ export class ChatGateway {
     @ConnectedSocket() client: SocketClient,
     @MessageBody() sessionId: string,
   ) {
+    for (const room of client.rooms ?? []) {
+      if (room !== client.id && room !== sessionId) {
+        await client.leave(room);
+      }
+    }
     await client.join(sessionId);
     const messages = await this.chatService.listMessages(sessionId);
-    this.server.to(sessionId).emit('sessionJoined', { sessionId, messages });
+    client.emit('sessionJoined', { sessionId, messages });
     return { sessionId, messages };
   }
 

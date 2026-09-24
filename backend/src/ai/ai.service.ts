@@ -33,7 +33,7 @@ export class AiService {
   async complete(prompt: string, context: AiToolContext = {}): Promise<string> {
     return this.runWithTools(
       [
-        { role: 'system', content: this.systemPrompt() },
+        { role: 'system', content: await this.systemPrompt() },
         { role: 'user', content: prompt },
       ],
       context,
@@ -59,12 +59,21 @@ export class AiService {
     }
 
     const messages: DeepseekChatMessage[] = [
-      { role: 'system', content: this.systemPrompt() },
+      { role: 'system', content: await this.systemPrompt() },
       ...recent.map((message) => ({
         role: message.role as 'user' | 'assistant',
         content: message.content,
       })),
     ];
+
+    if (lastUser && isAvailabilityIntent(lastUser.content)) {
+      messages.push({
+        role: 'system',
+        content:
+          'El paciente está preguntando por horas disponibles. Llama verCupos en este turno, aunque ya hayas hablado de horas antes: las que aparecen en el chat están desactualizadas. Ofrece todas las horas que devuelva la herramienta. Si son muchas, agrúpalas en mañana (antes de 12:00) y tarde (12:00 en adelante); si todas caen en el mismo bloque, muestra una sola lista sin títulos.',
+      });
+      this.logger.log(`AI availability nudge session=${conversation.id}`);
+    }
 
     this.logger.log(`AI reply session=${conversation.id} turns=${recent.length}`);
     return this.runWithTools(messages, { celular: conversation.phone });
@@ -121,12 +130,32 @@ export class AiService {
       { celular: conversation.phone },
     )) as MedilinkCita[];
     const current = pickUpcomingCita(citas);
+    const horaActual = current?.hora_inicio?.slice(0, 5);
+    // Si el paciente solo dijo "confirmo", la hora pedida está en la pregunta de
+    // confirmación. No se busca más atrás para no tomar una hora de un listado.
+    const lastAssistant =
+      [...recent].reverse().find((message) => message.role === 'assistant')?.content ?? '';
+    const hora =
+      extractHora(lastUser) ??
+      (isChangeConfirmPrompt(lastAssistant)
+        ? extractHoraObjetivo(lastAssistant, horaActual)
+        : undefined) ??
+      horaActual;
     const fecha = extractFecha(lastUser, todayIso) ?? current?.fecha;
-    const hora = extractHora(lastUser) ?? current?.hora_inicio?.slice(0, 5);
 
     this.logger.log(
-      `AI forced cambiarCita session=${conversation.id} fecha=${fecha ?? ''} hora=${hora ?? ''} cita=${current?.id ?? ''}`,
+      `AI forced cambio session=${conversation.id} fecha=${fecha ?? ''} hora=${hora ?? ''} cita=${current?.id ?? ''} profesional=${profesional ?? ''}`,
     );
+
+    if (
+      current &&
+      fecha === current.fecha &&
+      hora === horaActual &&
+      isSameProfesional(profesional, current)
+    ) {
+      return `Tu hora ya está agendada para el ${fecha} a las ${horaActual}. ¿A qué hora la quieres mover?`;
+    }
+
     try {
       const result = (await this.executeTool(
         {
@@ -144,14 +173,19 @@ export class AiService {
       const when = [result.fecha ?? fecha, (result.hora_inicio ?? hora ?? '').slice(0, 5)]
         .filter(Boolean)
         .join(' a las ');
-      const who = result.nombre_profesional ?? result.nombre_dentista;
+      const who = result.nombre_profesional ?? result.nombre_dentista ?? profesional;
       return who
-        ? `Listo, tu hora quedó el ${when} con ${who}.`
-        : `Listo, tu hora quedó el ${when}.`;
+        ? `Listo, tu hora quedó cambiada al ${when} con ${who}.`
+        : `Listo, tu hora quedó cambiada al ${when}.`;
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Error desconocido';
-      this.logger.warn(`AI forced cambiarCita failed: ${detail}`);
-      return 'No pude cambiar esa hora en el sistema. ¿Me confirmas el día, la hora y el profesional?';
+      this.logger.warn(`AI forced cambio failed: ${detail}`);
+      if (/tope con otra cita|ya cuenta con una cita|cupo/i.test(detail)) {
+        return hora
+          ? `Las ${hora} se acaban de ocupar. ¿Quieres que te ofrezca las otras horas libres de ese día?`
+          : 'Esa hora se acaba de ocupar. ¿Quieres que te ofrezca las otras horas libres de ese día?';
+      }
+      return 'No pude cambiar esa hora en el sistema. ¿Quieres que te ofrezca otra alternativa?';
     }
   }
 
@@ -173,14 +207,35 @@ export class AiService {
     }
   }
 
-  private systemPrompt(): string {
+  private async systemPrompt(): Promise<string> {
     const now = new Date();
     const todayIso = now.toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
     const weekday = now.toLocaleDateString('es-CL', {
       weekday: 'long',
       timeZone: 'America/Santiago',
     });
-    return buildClinicaHeraPrompt(todayIso, weekday);
+    const horaActual = now.toLocaleTimeString('en-GB', {
+      timeZone: 'America/Santiago',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const sucursales = await this.listSucursalesPrompt();
+    return buildClinicaHeraPrompt(todayIso, weekday, sucursales, horaActual);
+  }
+
+  private async listSucursalesPrompt() {
+    try {
+      const items = await this.medilinkService.listSucursales();
+      return items
+        .filter((item) => item.habilitada !== 0)
+        .map((item) => ({ nombre: item.nombre?.trim() || `Sucursal ${item.id}` }));
+    } catch (error) {
+      this.logger.warn(
+        `No pude leer sucursales para el prompt: ${error instanceof Error ? error.message : 'error'}`,
+      );
+      return [];
+    }
   }
 
   private async runWithTools(
@@ -261,6 +316,9 @@ export class AiService {
       case 'verCupos':
         return this.verCupos(args);
 
+      case 'verProfesionales':
+        return this.verProfesionales(asString(args.especialidad));
+
       case 'crearCita': {
         const fecha = asString(args.fecha);
         const hora = asString(args.hora_inicio);
@@ -277,6 +335,7 @@ export class AiService {
           id_sucursal: asNumber(args.id_sucursal),
           id_paciente: asNumber(args.id_paciente),
           celular: preferConversationPhone(asString(args.celular), context.celular),
+          nueva_atencion: args.reemplazo === true,
         });
       }
 
@@ -322,6 +381,39 @@ export class AiService {
     }
   }
 
+  private async verProfesionales(especialidad?: string) {
+    const [profesionales, especialidades] = await Promise.all([
+      this.medilinkService.listProfesionales(),
+      this.medilinkService.listEspecialidades(),
+    ]);
+    const especialidadById = new Map(
+      especialidades.map((item) => [item.id, item.nombre ?? ''] as const),
+    );
+    const needle = especialidad ? fold(especialidad) : '';
+
+    return profesionales
+      .filter((item) => item.habilitado !== 0)
+      .map((item) => {
+        const nombre = [item.nombre, item.apellidos]
+          .filter(Boolean)
+          .join(' ')
+          .replace(/\b(dr\.?|dra\.?|dentista|m[eé]dico)\b/gi, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const rubro =
+          item.especialidad?.trim() ||
+          especialidadById.get(item.id_especialidad ?? -1)?.trim() ||
+          'Consulta general';
+        return {
+          id: item.id,
+          nombre,
+          especialidad: rubro,
+        };
+      })
+      .filter((item) => item.nombre)
+      .filter((item) => !needle || fold(`${item.nombre} ${item.especialidad}`).includes(needle));
+  }
+
   private async verCupos(args: Record<string, unknown>) {
     const fecha = asString(args.fecha);
     const duracion = asNumber(args.duracion);
@@ -340,12 +432,26 @@ export class AiService {
     }
 
     if (fecha) {
-      return this.medilinkService.getAgenda({
+      let slots = await this.medilinkService.getAgenda({
         fecha,
         id_sucursal: idSucursal,
         id_profesional: idProfesional,
         duracion,
       });
+      if (!slots.length && idSucursal) {
+        slots = await this.medilinkService.getAgenda({
+          fecha,
+          id_profesional: idProfesional,
+          duracion,
+        });
+      }
+      const horas = [...new Set(slots.map((slot) => (slot.hora_inicio ?? '').slice(0, 5)).filter(Boolean))];
+      return {
+        fecha,
+        cantidad: horas.length,
+        horas,
+        profesional: slots[0]?.nombre_profesional,
+      };
     }
 
     const especialidadId =
@@ -406,13 +512,27 @@ function shouldForceChange(userText: string, lastAssistant?: string): boolean {
   if (isChangeIntent(userText) && hasDetails) {
     return true;
   }
-  return isAffirmative(userText) && Boolean(lastAssistant && isChangeIntent(lastAssistant));
+  return isAffirmative(userText) && Boolean(lastAssistant && isChangeConfirmPrompt(lastAssistant));
 }
 
 function isChangeIntent(text: string): boolean {
   return /(cambi(ar|o)|reprogram|otro profesional|profesional|otra hora|pasarla|moverla)/i.test(
     text,
   );
+}
+
+/**
+ * Solo cuenta como confirmación si la IA propuso un horario concreto. Si todavía
+ * está pidiendo datos ("¿con qué profesional?"), un "sí" no debe ejecutar el cambio.
+ */
+function isChangeConfirmPrompt(text: string): boolean {
+  if (isCancelIntent(text) || !isChangeIntent(text)) {
+    return false;
+  }
+  if (/(qu[eé]|cu[aá]l)\s+profesional|lista de (los )?profesionales/i.test(text)) {
+    return false;
+  }
+  return Boolean(extractHora(text));
 }
 
 function extractProfesional(text: string): string | undefined {
@@ -470,21 +590,42 @@ function extractFecha(text: string, todayIso: string): string | undefined {
 }
 
 function extractHora(text: string): string | undefined {
-  const clock = text.match(/\b(\d{1,2}):(\d{2})\b/);
-  if (clock) {
+  const clock = text.match(/\b(\d{1,2})[:.](\d{2})\b/);
+  if (clock && Number(clock[1]) <= 23 && Number(clock[2]) < 60) {
     return `${clock[1].padStart(2, '0')}:${clock[2]}`;
   }
 
-  const spoken = text.match(/\blas\s+(\d{1,2})(?:\s+de\s+la\s+(mañana|tarde|noche))?\b/i);
+  // "a las 1130" o "1130 hrs": pegado, sin separador.
+  const compact =
+    text.match(/\blas\s+(\d{1,2})(\d{2})\b/i) ??
+    text.match(/\b(\d{1,2})(\d{2})\s*(?:hrs?|horas)\b/i);
+  if (compact && Number(compact[1]) <= 23 && Number(compact[2]) < 60) {
+    return `${compact[1].padStart(2, '0')}:${compact[2]}`;
+  }
+
+  const spoken = text.match(
+    /\blas\s+(\d{1,2})(?:\s+y\s+(media|treinta))?(?:\s+de\s+la\s+(mañana|tarde|noche))?\b/i,
+  );
   if (!spoken) {
     return undefined;
   }
   let hour = Number(spoken[1]);
-  const period = spoken[2]?.toLowerCase();
+  const period = spoken[3]?.toLowerCase();
   if ((period === 'tarde' || period === 'noche') && hour < 12) {
     hour += 12;
   }
-  return `${String(hour).padStart(2, '0')}:00`;
+  return `${String(hour).padStart(2, '0')}:${spoken[2] ? '30' : '00'}`;
+}
+
+/**
+ * La pregunta de confirmación menciona la hora vigente y la nueva ("tu cita es a
+ * las 11:00, ¿la cambio a las 11:30?"), así que hay que tomar la que no es la actual.
+ */
+function extractHoraObjetivo(text: string, horaActual?: string): string | undefined {
+  const horas = [...text.matchAll(/\b(\d{1,2})[:.](\d{2})\b/g)]
+    .filter((match) => Number(match[1]) <= 23 && Number(match[2]) < 60)
+    .map((match) => `${match[1].padStart(2, '0')}:${match[2]}`);
+  return [...horas].reverse().find((hora) => hora !== horaActual) ?? extractHora(text);
 }
 
 function addIsoDays(iso: string, days: number): string {
@@ -522,8 +663,41 @@ function isCancelIntent(text: string): boolean {
   return /(cancelar|anula(r|s|e)?|elimina(r)? (la )?cita|borra(r)? (la )?hora)/i.test(text);
 }
 
+function isAvailabilityIntent(text: string): boolean {
+  if (isCancelIntent(text)) {
+    return false;
+  }
+  if (/(cupos?|disponibilidad|disponibles?)/i.test(text)) {
+    return true;
+  }
+  if (/\bhay\b/i.test(text) && /(hora|\d{1,2}([:.]\d{2})?|ma[ñn]ana|tarde)/i.test(text)) {
+    return true;
+  }
+  return /\bhoras?\b/i.test(text) &&
+    /(qu[eé]|cu[aá]l|dime|mu[eé]stra|muestra|ver|tiene|tienes|quedan|libres)/i.test(text);
+}
+
+const AFFIRMATIVE_START = /^(si|ok|okey|oka|dale|ya|listo|claro|confirmo|confirma|confirmado|perfecto|sipo|sale|bueno)$/;
+
+const AFFIRMATIVE_FILLER = new Set([
+  'si', 'ok', 'okey', 'oka', 'dale', 'ya', 'listo', 'claro', 'confirmo', 'confirma',
+  'confirmado', 'perfecto', 'sipo', 'sale', 'bueno', 'de', 'acuerdo', 'por', 'favor',
+  'porfavor', 'porfa', 'pf', 'gracias', 'esa', 'eso', 'esta', 'mismo',
+]);
+
+/**
+ * Un "sí" suelto confirma; "si, muestra la lista" es una petición nueva y no debe
+ * disparar los flujos forzados de cambio o agendamiento.
+ */
 function isAffirmative(text: string): boolean {
-  return /^(sí|si|ok|dale|ya|confirmo|confirma)\b/i.test(text.trim());
+  const words = fold(text)
+    .replace(/[^a-z0-9ñ\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length || !AFFIRMATIVE_START.test(words[0])) {
+    return false;
+  }
+  return words.every((word) => AFFIRMATIVE_FILLER.has(word));
 }
 
 function preferConversationPhone(arg?: string, context?: string): string | undefined {
@@ -564,10 +738,30 @@ function asNumber(value: unknown): number | undefined {
 }
 
 function truncateToolResult(value: unknown): unknown {
+  if (value && typeof value === 'object' && !Array.isArray(value) && 'horas' in value) {
+    return value;
+  }
   if (!Array.isArray(value)) {
     return value;
   }
+  if (value[0] && typeof value[0] === 'object' && value[0] !== null && 'hora_inicio' in value[0]) {
+    return value;
+  }
   return value.slice(0, 12);
+}
+
+function isSameProfesional(nombre: string | undefined, cita: MedilinkCita): boolean {
+  if (!nombre) {
+    return true;
+  }
+  const actual = fold(cita.nombre_profesional ?? cita.nombre_dentista ?? '');
+  if (!actual) {
+    return true;
+  }
+  return fold(nombre)
+    .split(/\s+/)
+    .filter((part) => part.length > 2)
+    .some((part) => actual.includes(part));
 }
 
 function fold(value: string): string {

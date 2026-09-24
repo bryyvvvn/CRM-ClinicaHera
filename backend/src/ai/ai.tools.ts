@@ -2,6 +2,7 @@ export type AiToolName =
   | 'buscarPaciente'
   | 'verCitas'
   | 'verCupos'
+  | 'verProfesionales'
   | 'crearCita'
   | 'confirmarCita'
   | 'anularCita'
@@ -57,7 +58,7 @@ export const AI_TOOLS: AiToolDefinition[] = [
     function: {
       name: 'verCupos',
       description:
-        'Consulta horas disponibles. Si hay fecha usa la agenda de ese día; si no, las próximas de una especialidad.',
+        'Consulta TODAS las horas libres de un día (campo horas). No asumas que solo hay 2 o 3. Si no hay fecha, trae las próximas de una especialidad.',
       parameters: {
         type: 'object',
         properties: {
@@ -67,6 +68,23 @@ export const AI_TOOLS: AiToolDefinition[] = [
           nombre_profesional: { type: 'string' },
           id_especialidad: { type: 'number' },
           duracion: { type: 'number', description: 'Minutos; por defecto 30' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'verProfesionales',
+      description:
+        'Lista los profesionales habilitados de la clínica con su especialidad. Usar cuando el paciente pregunta qué doctores hay, qué especialidades atienden o con quién puede agendar.',
+      parameters: {
+        type: 'object',
+        properties: {
+          especialidad: {
+            type: 'string',
+            description: 'Opcional. Filtra por especialidad o tipo de atención (ej. ginecología, pediatría).',
+          },
         },
       },
     },
@@ -89,6 +107,10 @@ export const AI_TOOLS: AiToolDefinition[] = [
           id_sucursal: { type: 'number' },
           id_paciente: { type: 'number' },
           celular: { type: 'string' },
+          reemplazo: {
+            type: 'boolean',
+            description: 'true si esta cita reemplaza otra vigente (cambio de profesional o sucursal)',
+          },
         },
         required: ['fecha', 'hora_inicio'],
       },
@@ -130,7 +152,7 @@ export const AI_TOOLS: AiToolDefinition[] = [
     function: {
       name: 'cambiarCita',
       description:
-        'Reprograma una cita existente (hora, fecha o profesional) sin anularla. Usar cuando el paciente quiere cambiar la hora o el profesional. Si no hay id_cita, usa la próxima del paciente.',
+        'Cambia día y hora de una cita vigente. Si también viene otro profesional, el backend crea la hora nueva y libera la anterior: al paciente solo dile que su hora quedó cambiada. No anules a mano. Si no hay id_cita, usa la próxima vigente.',
       parameters: {
         type: 'object',
         properties: {

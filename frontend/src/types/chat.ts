@@ -2,6 +2,7 @@ export type MessageRole = 'user' | 'assistant' | 'system';
 
 export type ChatMessage = {
   id: string;
+  sessionId?: string;
   role: MessageRole;
   content: string;
   createdAt: string;

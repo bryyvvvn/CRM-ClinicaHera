@@ -148,6 +148,7 @@ export class ChatService {
   private toMessageDto(message: Message): ChatMessageDto {
     return {
       id: message.id,
+      sessionId: message.chatSessionId,
       role: message.role,
       content: message.content,
       createdAt: message.createdAt.toISOString(),

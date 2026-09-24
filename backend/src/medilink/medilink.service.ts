@@ -146,7 +146,8 @@ export class MedilinkService {
       this.optionalNumber('MEDILINK_DEFAULT_PROFESIONAL_ID') ??
       (await this.resolveProfesionalId({}));
     const duracion = query.duracion ?? DEFAULT_DURATION;
-    const host = this.writeBaseUrl();
+    const { baseUrl } = this.credentials();
+    const hosts = [...new Set([this.writeBaseUrl(), baseUrl])];
     const sucursales = query.id_sucursal
       ? [query.id_sucursal]
       : [
@@ -155,56 +156,108 @@ export class MedilinkService {
           (await this.firstSucursal()).id,
         ].filter((id, index, all): id is number => id !== undefined && all.indexOf(id) === index);
 
+    const collected: MedilinkCupo[] = [];
     for (const sucursalId of sucursales) {
-      try {
-        const slots = normalizeCupos(
-          await this.getList<Record<string, unknown>>(
-            '/agendas',
-            {
-              id_sucursal: { eq: sucursalId },
-              fecha: { eq: query.fecha },
-              duracion: { eq: duracion },
-              id_dentista: { eq: profesionalId },
-            },
-            host,
-          ),
-        ).filter((slot) => !slot.id_profesional || slot.id_profesional === profesionalId);
-        if (slots.length) {
-          return slots;
+      for (const host of hosts) {
+        try {
+          const slots = normalizeCupos(
+            await this.getList<Record<string, unknown>>(
+              '/agendas',
+              {
+                id_sucursal: { eq: sucursalId },
+                fecha: { eq: query.fecha },
+                duracion: { eq: duracion },
+                id_dentista: { eq: profesionalId },
+                id_profesional: { eq: profesionalId },
+              },
+              host,
+            ),
+          ).filter((slot) => !slot.id_profesional || slot.id_profesional === profesionalId);
+          collected.push(...slots);
+        } catch (error) {
+          this.logger.warn(
+            `GET /agendas sucursal=${sucursalId} falló (${error instanceof Error ? error.message : 'error'})`,
+          );
         }
-      } catch (error) {
-        this.logger.warn(
-          `GET /agendas sucursal=${sucursalId} falló (${error instanceof Error ? error.message : 'error'})`,
-        );
-      }
 
-      try {
-        const grid = await this.request<unknown>(
-          'GET',
-          `/sucursales/${sucursalId}/dentistas/${profesionalId}/agendas`,
-          {
-            filter: {
-              fecha_inicio: { eq: query.fecha },
-              fecha_fin: { eq: query.fecha },
-              mostrar_detalles: { eq: 0 },
+        try {
+          const grid = await this.request<unknown>(
+            'GET',
+            `/sucursales/${sucursalId}/dentistas/${profesionalId}/agendas`,
+            {
+              filter: {
+                fecha_inicio: { eq: query.fecha },
+                fecha_fin: { eq: query.fecha },
+                mostrar_detalles: { eq: 0 },
+              },
+              baseUrl: host,
             },
-            baseUrl: host,
-          },
-        );
-        const slots = flattenDentistAgenda(grid, query.fecha, profesionalId, duracion);
-        if (slots.length) {
-          return slots;
+          );
+          collected.push(...flattenDentistAgenda(grid, query.fecha, profesionalId, duracion));
+        } catch (error) {
+          this.logger.warn(
+            `GET agenda dentista=${profesionalId} sucursal=${sucursalId} falló (${
+              error instanceof Error ? error.message : 'error'
+            })`,
+          );
         }
-      } catch (error) {
-        this.logger.warn(
-          `GET agenda dentista=${profesionalId} sucursal=${sucursalId} falló (${
-            error instanceof Error ? error.message : 'error'
-          })`,
-        );
       }
     }
 
-    return [];
+    const ocupadas = await this.horasOcupadas(query.fecha, profesionalId, hosts);
+    return uniqueCupos(collected).filter((slot) => !ocupadas.has(slot.hora_inicio ?? ''));
+  }
+
+  /**
+   * La unión de agendas de los dos hosts puede traer horas que ya tienen cita,
+   * así que las citas del día son la fuente final de verdad.
+   */
+  private async horasOcupadas(
+    fecha: string,
+    profesionalId: number,
+    hosts: string[],
+  ): Promise<Set<string>> {
+    const ocupadas = new Set<string>();
+    for (const host of hosts) {
+      for (const campo of ['id_profesional', 'id_dentista']) {
+        try {
+          const citas = await this.getList<MedilinkCita>(
+            '/citas',
+            { fecha: { eq: fecha }, [campo]: { eq: profesionalId } },
+            host,
+          );
+          for (const cita of citas) {
+            const citaProfesional = cita.id_profesional ?? cita.id_dentista;
+            const mismoDia = !cita.fecha || cita.fecha === fecha;
+            if (!mismoDia || (citaProfesional && citaProfesional !== profesionalId)) {
+              continue;
+            }
+            if (isCitaAnulada(cita)) {
+              continue;
+            }
+            for (const hora of citaHoras(cita)) {
+              ocupadas.add(hora);
+            }
+          }
+          break;
+        } catch (error) {
+          this.logger.warn(
+            `GET /citas fecha=${fecha} ${campo}=${profesionalId} falló (${
+              error instanceof Error ? error.message : 'error'
+            })`,
+          );
+        }
+      }
+    }
+
+    if (ocupadas.size) {
+      this.logger.log(
+        `Agenda ${fecha} profesional=${profesionalId} horas ocupadas: ${[...ocupadas]
+          .sort()
+          .join(', ')}`,
+      );
+    }
+    return ocupadas;
   }
 
   async createCita(input: CreateCitaInput): Promise<MedilinkCita> {
@@ -248,6 +301,18 @@ export class MedilinkService {
       `MediLink POST /citas paciente=${paciente.id} fecha=${body.fecha} hora=${body.hora_inicio}`,
     );
 
+    try {
+      return await this.postCitaHosts(body);
+    } catch (error) {
+      if (!input.nueva_atencion && !input.id_atencion && this.isAtencionOcupadaError(error)) {
+        this.logger.warn('POST /citas: la atención ya tiene cita; creo un tratamiento nuevo');
+        return this.createCita({ ...input, nueva_atencion: true });
+      }
+      throw error;
+    }
+  }
+
+  private async postCitaHosts(body: Record<string, number | string>): Promise<MedilinkCita> {
     try {
       return await this.post<MedilinkCita>('/citas/', body);
     } catch (error) {
@@ -307,52 +372,98 @@ export class MedilinkService {
       return_options: 0,
     };
 
-    const sillonIds: Array<number | undefined> = [
-      input.id_sillon ?? current.id_sillon ?? 1,
-    ];
+    const currentProfesional = current.id_profesional ?? current.id_dentista;
+    if (currentProfesional && profesionalId !== currentProfesional) {
+      return this.replaceCita(current, {
+        fecha,
+        hora_inicio: hora,
+        id_profesional: profesionalId,
+        id_sillon: input.id_sillon ?? current.id_sillon,
+      });
+    }
 
+    try {
+      this.logger.log(
+        `MediLink POST /citas/changeDate cita=${current.id} fecha=${fecha} hora=${hora} dentista=${profesionalId} sillon=${input.id_sillon ?? current.id_sillon ?? 1}`,
+      );
+      return await this.post<MedilinkCita>(
+        '/citas/changeDate',
+        {
+          ...base,
+          id_sillon: input.id_sillon ?? current.id_sillon ?? 1,
+        },
+        this.writeBaseUrl(),
+      );
+    } catch (error) {
+      if (!this.isSillonChangeError(error)) {
+        throw error;
+      }
+      this.logger.warn(`changeDate sin sillón; reemplazo cita=${current.id} por una nueva`);
+      return this.replaceCita(current, {
+        fecha,
+        hora_inicio: hora,
+        id_profesional: profesionalId,
+        id_sillon: input.id_sillon ?? current.id_sillon,
+      });
+    }
+  }
+
+  private async replaceCita(
+    current: MedilinkCita,
+    input: {
+      fecha: string;
+      hora_inicio: string;
+      id_profesional: number;
+      id_sillon?: number;
+    },
+  ): Promise<MedilinkCita> {
+    const homeSucursal = await this.resolveProfesionalSucursal(
+      input.id_profesional,
+      current.id_sucursal,
+    );
+    const sucursales = [...new Set([current.id_sucursal, homeSucursal].filter(
+      (id): id is number => typeof id === 'number',
+    ))];
+
+    let created: MedilinkCita | undefined;
     let lastError: unknown;
-    for (const sillonId of sillonIds) {
-      const body =
-        sillonId === undefined ? { ...base } : { ...base, id_sillon: sillonId };
+    for (const idSucursal of sucursales) {
       try {
         this.logger.log(
-          `MediLink POST /citas/changeDate cita=${current.id} fecha=${fecha} hora=${hora} dentista=${profesionalId} sillon=${sillonId ?? 'auto'}`,
+          `MediLink reemplazo cita=${current.id} → profesional=${input.id_profesional} sucursal=${idSucursal}`,
         );
-        return await this.post<MedilinkCita>('/citas/changeDate', body, this.writeBaseUrl());
+        created = await this.createCita({
+          fecha: input.fecha,
+          hora_inicio: input.hora_inicio,
+          id_paciente: current.id_paciente,
+          id_profesional: input.id_profesional,
+          id_sucursal: idSucursal,
+          id_sillon: input.id_sillon,
+          comentario: 'Cambio de hora por WhatsApp',
+          nueva_atencion: true,
+        });
+        break;
       } catch (error) {
-        if (!this.isSillonChangeError(error)) {
-          throw error;
-        }
         lastError = error;
         this.logger.warn(
-          `changeDate sin cupo de sillón (${sillonId ?? 'auto'}); pruebo otro`,
+          `No pude crear la hora nueva en sucursal=${idSucursal}: ${
+            error instanceof Error ? error.message : 'error'
+          }`,
         );
       }
     }
 
-    const targetSucursal = await this.resolveProfesionalSucursal(
-      profesionalId,
-      current.id_sucursal,
-    );
-    this.logger.warn(
-      `changeDate sin sillón; muevo cita=${current.id} a sucursal=${targetSucursal} profesional=${profesionalId}`,
-    );
-    const created = await this.createCita({
-      fecha,
-      hora_inicio: hora,
-      id_paciente: current.id_paciente,
-      id_profesional: profesionalId,
-      id_sucursal: targetSucursal,
-      id_sillon: typeof sillonIds[0] === 'number' ? sillonIds[0] : current.id_sillon,
-      comentario: 'Cambio de profesional por WhatsApp',
-      nueva_atencion: true,
-    });
+    if (!created) {
+      throw lastError instanceof HttpException
+        ? lastError
+        : new HttpException('No se pudo cambiar la hora en el sistema', 409);
+    }
+
     try {
       await this.anularCita(current.id);
     } catch (error) {
       this.logger.warn(
-        `Cita nueva ${created.id} creada pero no pude anular ${current.id}: ${
+        `Hora nueva ${created.id} lista, pero no pude liberar ${current.id}: ${
           error instanceof Error ? error.message : 'error'
         }`,
       );
@@ -602,6 +713,11 @@ export class MedilinkService {
     return /sillon/i.test(message);
   }
 
+  private isAtencionOcupadaError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /atenci[oó]n ya cuenta con una cita/i.test(message);
+  }
+
   private optionalNumber(key: string): number | undefined {
     const raw = this.configService.get<string>(key);
     if (!raw) {
@@ -733,6 +849,59 @@ function normalizeCupos(items: Array<Record<string, unknown> | MedilinkCupo>): M
       };
     })
     .filter((item) => !item.id_paciente);
+}
+
+function isCitaAnulada(cita: MedilinkCita): boolean {
+  const estado = (cita.estado_cita ?? '').toLowerCase();
+  if (estado.includes('anul')) {
+    return true;
+  }
+  return cita.estado_anulacion === 1 && !estado.includes('cambio');
+}
+
+/** Una cita de 60 minutos bloquea 11:00 y 11:30, no solo su hora de inicio. */
+function citaHoras(cita: MedilinkCita): string[] {
+  const inicio = toMinutes(cita.hora_inicio);
+  if (inicio === undefined) {
+    return [];
+  }
+  const fin = toMinutes(cita.hora_fin) ?? inicio + (cita.duracion ?? DEFAULT_DURATION);
+  const horas: string[] = [];
+  for (let minute = inicio; minute < Math.max(fin, inicio + 1); minute += 30) {
+    horas.push(fromMinutes(minute));
+  }
+  return horas;
+}
+
+function toMinutes(value?: string): number | undefined {
+  const match = /^(\d{1,2}):(\d{2})/.exec(value ?? '');
+  return match ? Number(match[1]) * 60 + Number(match[2]) : undefined;
+}
+
+function fromMinutes(value: number): string {
+  const hours = Math.floor(value / 60);
+  const minutes = value % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+function uniqueCupos(items: MedilinkCupo[]): MedilinkCupo[] {
+  const seen = new Set<string>();
+  const unique: MedilinkCupo[] = [];
+  for (const item of items) {
+    const hora = (item.hora_inicio ?? '').slice(0, 5);
+    if (!hora) {
+      continue;
+    }
+    const key = `${item.fecha ?? ''}|${hora}|${item.id_profesional ?? ''}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    unique.push({ ...item, hora_inicio: hora });
+  }
+  return unique.sort((left, right) =>
+    (left.hora_inicio ?? '').localeCompare(right.hora_inicio ?? ''),
+  );
 }
 
 function flattenDentistAgenda(

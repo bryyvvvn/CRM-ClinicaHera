@@ -30,6 +30,9 @@ export function useChatWebsocket(sessionId?: string) {
     socket.on('connect', () => setConnected(true));
     socket.on('disconnect', () => setConnected(false));
     socket.on('newMessage', (message: ChatMessage) => {
+      if (message.sessionId && message.sessionId !== sessionIdRef.current) {
+        return;
+      }
       setMessages((current) => {
         if (current.some((item) => item.id === message.id)) {
           return current;
