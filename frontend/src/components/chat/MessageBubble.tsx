@@ -22,7 +22,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   if (message.role === 'system') {
     return (
       <div className="my-1 flex justify-center">
-        <p className="max-w-lg rounded-full bg-white/80 px-4 py-1.5 text-center text-[11px] leading-5 text-[var(--hera-muted)] shadow-sm ring-1 ring-[var(--hera-border)]">
+        <p className="max-w-lg rounded-full bg-[var(--hera-surface)] px-4 py-1.5 text-center text-[11px] leading-5 text-[var(--hera-muted)] shadow-sm ring-1 ring-[var(--hera-border)]">
           {message.content}
         </p>
       </div>
@@ -42,7 +42,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         className={`min-w-0 max-w-[85%] rounded-2xl px-4 py-2.5 text-[13.5px] leading-[1.5] [overflow-wrap:anywhere] shadow-[0_4px_14px_rgba(46,70,77,0.035)] sm:text-sm md:min-w-[110px] md:[max-width:min(680px,62%)] ${
           fromClinic
             ? 'rounded-br-md bg-[var(--hera-blue-soft)] text-[var(--hera-text)]'
-            : 'rounded-bl-md bg-white text-[var(--hera-text)] ring-1 ring-[var(--hera-border)]'
+            : 'rounded-bl-md bg-[var(--hera-surface)] text-[var(--hera-text)] ring-1 ring-[var(--hera-border)]'
         }`}
       >
         <p className="whitespace-pre-wrap break-words">
@@ -60,7 +60,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       </div>
 
       {fromClinic ? (
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white ring-1 ring-[var(--hera-border)]">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--hera-logo-surface)] ring-1 ring-[var(--hera-border)]">
           <img
             src={heraLogo}
             alt="Clínica Hera"

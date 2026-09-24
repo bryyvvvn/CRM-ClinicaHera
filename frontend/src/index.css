@@ -21,9 +21,37 @@
   --hera-blue-soft: #eaf6f8;
   --hera-background: #f6f8f9;
   --hera-surface: #ffffff;
+  --hera-surface-soft: #f1f5f6;
   --hera-border: #e5ebed;
   --hera-text: #26383e;
   --hera-muted: #71858c;
+  --hera-placeholder: #94a3a8;
+  --hera-on-accent: #ffffff;
+  --hera-logo-surface: #ffffff;
+  --hera-scrollbar: #c9d5d8;
+  --hera-shadow: rgba(42, 72, 81, 0.05);
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --hera-coral: #f29a8d;
+  --hera-coral-dark: #f3aea3;
+  --hera-coral-soft: #3b2c2b;
+  --hera-blue: #56a9bd;
+  --hera-blue-dark: #7bc0d0;
+  --hera-blue-soft: #203c44;
+  --hera-background: #172126;
+  --hera-surface: #202c31;
+  --hera-surface-soft: #26363c;
+  --hera-border: #34474f;
+  --hera-text: #edf4f5;
+  --hera-muted: #9fb1b7;
+  --hera-placeholder: #82959c;
+  --hera-on-accent: #ffffff;
+  --hera-logo-surface: #ffffff;
+  --hera-scrollbar: #4a6068;
+  --hera-shadow: rgba(5, 12, 15, 0.2);
+  color-scheme: dark;
 }
 
 * {
@@ -42,6 +70,19 @@ body {
   background: var(--hera-background);
 }
 
+body,
+aside,
+header,
+nav,
+main,
+article,
+input {
+  transition:
+    background-color 180ms ease,
+    color 180ms ease,
+    border-color 180ms ease;
+}
+
 button,
 input {
   font: inherit;
@@ -57,7 +98,7 @@ button {
 }
 
 * {
-  scrollbar-color: #c9d5d8 transparent;
+  scrollbar-color: var(--hera-scrollbar) transparent;
   scrollbar-width: thin;
 }
 
@@ -69,7 +110,7 @@ button {
 *::-webkit-scrollbar-thumb {
   border: 2px solid transparent;
   border-radius: 999px;
-  background: #c9d5d8;
+  background: var(--hera-scrollbar);
   background-clip: padding-box;
 }
 

@@ -45,7 +45,7 @@ export function ChatWindow({
     return (
       <main className="flex h-full min-h-0 min-w-0 w-full flex-1 items-center justify-center overflow-hidden bg-[var(--hera-background)] px-6 text-center">
         <div>
-          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-white text-[var(--hera-blue)] shadow-sm ring-1 ring-[var(--hera-border)]">
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-[var(--hera-surface)] text-[var(--hera-blue)] shadow-sm ring-1 ring-[var(--hera-border)]">
             <MessageCircle size={27} strokeWidth={1.6} aria-hidden="true" />
           </div>
           <p className="mt-5 text-sm font-semibold text-[var(--hera-text)]">Selecciona una conversación</p>
@@ -69,7 +69,7 @@ export function ChatWindow({
 
   return (
     <main className="flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden bg-[var(--hera-background)]">
-      <header className="flex min-h-[76px] min-w-0 w-full items-center justify-between gap-3 overflow-hidden border-b border-[var(--hera-border)] bg-white px-3 py-3 sm:px-5">
+      <header className="flex min-h-[76px] min-w-0 w-full items-center justify-between gap-3 overflow-hidden border-b border-[var(--hera-border)] bg-[var(--hera-surface)] px-3 py-3 sm:px-5">
         <div className="flex min-w-0 items-center gap-3">
           <button
             type="button"
@@ -96,7 +96,7 @@ export function ChatWindow({
               <span aria-hidden="true">·</span>
               <span className="flex shrink-0 items-center gap-1">
                 <span
-                  className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                  className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-500' : 'bg-[var(--hera-muted)]'}`}
                 />
                 {connected ? 'Conectado' : 'Desconectado'}
               </span>
@@ -120,8 +120,8 @@ export function ChatWindow({
             onClick={() => onToggleAi(!conversation.isAiActive)}
             className={`flex h-9 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition sm:h-10 sm:px-4 ${
               conversation.isAiActive
-                ? 'border border-[var(--hera-border)] bg-white text-[var(--hera-text)] hover:border-[var(--hera-coral)] hover:text-[var(--hera-coral-dark)]'
-                : 'bg-[var(--hera-blue)] text-white hover:bg-[var(--hera-blue-dark)]'
+                ? 'border border-[var(--hera-border)] bg-[var(--hera-surface)] text-[var(--hera-text)] hover:border-[var(--hera-coral)] hover:text-[var(--hera-coral-dark)]'
+                : 'bg-[var(--hera-blue)] text-[var(--hera-on-accent)] hover:bg-[var(--hera-blue-dark)]'
             }`}
           >
             {conversation.isAiActive ? <Pause size={15} /> : <Play size={15} />}
@@ -145,7 +145,7 @@ export function ChatWindow({
 
       <form
         onSubmit={handleSubmit}
-        className="flex min-w-0 w-full items-center gap-2 overflow-hidden border-t border-[var(--hera-border)] bg-white px-3 py-3 sm:px-6"
+        className="flex min-w-0 w-full items-center gap-2 overflow-hidden border-t border-[var(--hera-border)] bg-[var(--hera-surface)] px-3 py-3 sm:px-6"
       >
         <label className="sr-only" htmlFor="message-draft">
           Mensaje
@@ -156,12 +156,12 @@ export function ChatWindow({
           onChange={(event) => setDraft(event.target.value)}
           placeholder="Escribe un mensaje..."
           autoComplete="off"
-          className="h-12 min-w-0 flex-1 rounded-2xl border border-[var(--hera-border)] bg-[var(--hera-background)] px-4 text-sm text-[var(--hera-text)] outline-none transition placeholder:text-slate-400 focus:border-[var(--hera-blue)] focus:bg-white focus:ring-4 focus:ring-[var(--hera-blue-soft)]"
+          className="h-12 min-w-0 flex-1 rounded-2xl border border-[var(--hera-border)] bg-[var(--hera-background)] px-4 text-sm text-[var(--hera-text)] outline-none transition placeholder:text-[var(--hera-placeholder)] focus:border-[var(--hera-blue)] focus:bg-[var(--hera-surface)] focus:ring-4 focus:ring-[var(--hera-blue-soft)]"
         />
         <button
           type="submit"
           disabled={!draft.trim()}
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--hera-blue)] text-white shadow-[0_8px_18px_rgba(39,127,150,0.2)] transition hover:bg-[var(--hera-blue-dark)] disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--hera-blue)] text-[var(--hera-on-accent)] shadow-[0_8px_18px_rgba(39,127,150,0.2)] transition hover:bg-[var(--hera-blue-dark)] disabled:cursor-not-allowed disabled:opacity-40"
           aria-label="Enviar mensaje"
         >
           <Send size={18} aria-hidden="true" />

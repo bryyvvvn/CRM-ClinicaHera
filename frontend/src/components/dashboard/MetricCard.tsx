@@ -9,14 +9,14 @@ type MetricCardProps = {
 };
 
 const toneStyles = {
-  blue: 'bg-[var(--hera-blue)] text-white',
+  blue: 'bg-[var(--hera-blue)] text-[var(--hera-on-accent)]',
   coral: 'bg-[var(--hera-coral-soft)] text-[var(--hera-coral-dark)]',
   'soft-blue': 'bg-[var(--hera-blue-soft)] text-[var(--hera-blue-dark)]',
 };
 
 export function MetricCard({ title, value, detail, icon: Icon, tone }: MetricCardProps) {
   return (
-    <article className="rounded-2xl border border-[var(--hera-border)] bg-white p-6 shadow-[0_12px_35px_rgba(42,72,81,0.05)]">
+    <article className="rounded-2xl border border-[var(--hera-border)] bg-[var(--hera-surface)] p-6 shadow-[0_12px_35px_var(--hera-shadow)]">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-sm font-medium text-[var(--hera-muted)]">{title}</p>

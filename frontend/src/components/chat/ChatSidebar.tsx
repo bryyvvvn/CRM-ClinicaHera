@@ -53,7 +53,7 @@ export function ChatSidebar({
   });
 
   return (
-    <aside className="flex h-full min-h-0 min-w-0 w-full flex-col border-r border-[var(--hera-border)] bg-white">
+    <aside className="flex h-full min-h-0 min-w-0 w-full flex-col border-r border-[var(--hera-border)] bg-[var(--hera-surface)]">
       <div className="border-b border-[var(--hera-border)] px-5 py-5">
         <div className="flex items-center justify-between gap-3">
           <div>
@@ -74,7 +74,7 @@ export function ChatSidebar({
               aria-pressed={filter === item.id}
               className={`flex-1 rounded-lg px-2 py-1.5 text-xs font-medium transition ${
                 filter === item.id
-                  ? 'bg-white text-[var(--hera-blue-dark)] shadow-sm'
+                  ? 'bg-[var(--hera-surface)] text-[var(--hera-blue-dark)] shadow-sm'
                   : 'text-[var(--hera-muted)] hover:text-[var(--hera-text)]'
               }`}
             >
@@ -117,7 +117,7 @@ export function ChatSidebar({
                   <div
                     className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-sm font-semibold ${
                       selected
-                        ? 'bg-white text-[var(--hera-coral-dark)]'
+                        ? 'bg-[var(--hera-surface)] text-[var(--hera-coral-dark)]'
                         : 'bg-[var(--hera-blue-soft)] text-[var(--hera-blue-dark)]'
                     }`}
                   >
