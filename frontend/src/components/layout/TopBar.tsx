@@ -18,7 +18,7 @@ export function TopBar({
     <header className="flex h-20 shrink-0 items-center gap-4 border-b border-[var(--hera-border)] bg-white px-4 sm:px-6 lg:px-8">
       <div className="min-w-0 flex-1">
         {isConversations ? (
-          <label className="relative block max-w-xl">
+          <label className="relative block max-w-[680px]">
             <span className="sr-only">Buscar conversaciones</span>
             <Search
               size={18}
@@ -30,7 +30,7 @@ export function TopBar({
               value={conversationSearch}
               onChange={(event) => onConversationSearchChange(event.target.value)}
               placeholder="Buscar conversaciones por nombre o número..."
-              className="h-11 w-full rounded-xl border border-[var(--hera-border)] bg-[var(--hera-background)] pl-11 pr-4 text-sm text-[var(--hera-text)] outline-none transition focus:border-[var(--hera-blue)] focus:bg-white focus:ring-4 focus:ring-[var(--hera-blue-soft)]"
+              className="h-[46px] w-full rounded-[14px] border border-[var(--hera-border)] bg-[var(--hera-background)] pl-11 pr-4 text-sm text-[var(--hera-text)] outline-none transition focus:border-[var(--hera-blue)] focus:bg-white focus:ring-4 focus:ring-[var(--hera-blue-soft)]"
             />
           </label>
         ) : (

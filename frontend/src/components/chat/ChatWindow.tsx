@@ -1,6 +1,8 @@
 import { ArrowLeft, Bot, MessageCircle, Pause, Play, Send, UserRound } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { formatChileanPhone } from '../../utils/formatPhone.ts';
 import type { ChatMessage, Conversation } from '../../types/chat.ts';
+import { WhatsAppIcon } from '../icons/WhatsAppIcon.tsx';
 import { MessageBubble } from './MessageBubble.tsx';
 
 type ChatWindowProps = {
@@ -67,7 +69,7 @@ export function ChatWindow({
 
   return (
     <main className="flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden bg-[var(--hera-background)]">
-      <header className="flex min-h-[82px] min-w-0 w-full items-center justify-between gap-3 overflow-hidden border-b border-[var(--hera-border)] bg-white px-3 py-3 sm:px-5">
+      <header className="flex min-h-[76px] min-w-0 w-full items-center justify-between gap-3 overflow-hidden border-b border-[var(--hera-border)] bg-white px-3 py-3 sm:px-5">
         <div className="flex min-w-0 items-center gap-3">
           <button
             type="button"
@@ -77,7 +79,7 @@ export function ChatWindow({
           >
             <ArrowLeft size={19} aria-hidden="true" />
           </button>
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--hera-blue-soft)] text-sm font-semibold text-[var(--hera-blue-dark)]">
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-[var(--hera-blue-soft)] text-sm font-semibold text-[var(--hera-blue-dark)]">
             {getInitials(conversation.patientName)}
           </div>
           <div className="min-w-0">
@@ -85,14 +87,12 @@ export function ChatWindow({
               <h2 className="truncate text-sm font-semibold text-[var(--hera-text)] sm:text-base">
                 {conversation.patientName}
               </h2>
-              <MessageCircle
-                size={15}
-                aria-label="WhatsApp"
-                className="shrink-0 text-emerald-600"
-              />
             </div>
             <div className="mt-0.5 flex items-center gap-2 text-[11px] text-[var(--hera-muted)] sm:text-xs">
-              <span className="truncate">{conversation.phone}</span>
+              <span className="flex min-w-0 items-center gap-1.5">
+                <WhatsAppIcon className="h-4 w-4 shrink-0 text-[#25D366]" />
+                <span className="truncate">{formatChileanPhone(conversation.phone)}</span>
+              </span>
               <span aria-hidden="true">·</span>
               <span className="flex shrink-0 items-center gap-1">
                 <span
@@ -132,7 +132,7 @@ export function ChatWindow({
         </div>
       </header>
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-x-hidden overflow-y-auto px-4 py-5 sm:px-6 lg:px-8">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2.5 overflow-x-hidden overflow-y-auto px-4 py-5 sm:gap-3 sm:px-6 sm:py-6 lg:px-8">
         {messages.length === 0 ? (
           <div className="flex flex-1 items-center justify-center text-center">
             <p className="text-xs text-[var(--hera-muted)]">Aún no hay mensajes en esta conversación.</p>
@@ -145,7 +145,7 @@ export function ChatWindow({
 
       <form
         onSubmit={handleSubmit}
-        className="flex min-w-0 w-full items-center gap-2 overflow-hidden border-t border-[var(--hera-border)] bg-white px-3 py-3 sm:px-6 sm:py-4"
+        className="flex min-w-0 w-full items-center gap-2 overflow-hidden border-t border-[var(--hera-border)] bg-white px-3 py-3 sm:px-6"
       >
         <label className="sr-only" htmlFor="message-draft">
           Mensaje

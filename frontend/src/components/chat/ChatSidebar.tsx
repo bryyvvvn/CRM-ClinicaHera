@@ -108,7 +108,7 @@ export function ChatSidebar({
                   type="button"
                   onClick={() => onSelect(conversation.id)}
                   aria-current={selected ? 'true' : undefined}
-                  className={`group my-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition-colors ${
+                  className={`group my-1 flex min-h-[72px] w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors ${
                     selected
                       ? 'bg-[var(--hera-coral-soft)]'
                       : 'hover:bg-[var(--hera-background)]'
@@ -126,7 +126,7 @@ export function ChatSidebar({
 
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm font-semibold text-[var(--hera-text)]">
+                      <span className="truncate text-[15px] font-semibold leading-5 text-[var(--hera-text)]">
                         {conversation.patientName}
                       </span>
                       <span
@@ -144,7 +144,7 @@ export function ChatSidebar({
                         {conversation.isAiActive ? 'IA' : 'Humano'}
                       </span>
                     </div>
-                    <p className="mt-1 truncate text-xs text-[var(--hera-muted)]">
+                    <p className="mt-1 truncate text-[13px] leading-[18px] text-[var(--hera-muted)]">
                       {conversation.lastMessage || 'Sin mensajes todavía'}
                     </p>
                   </div>

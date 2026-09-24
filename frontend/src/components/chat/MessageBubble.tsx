@@ -1,3 +1,4 @@
+import heraLogo from '../../assets/icono-hera.png';
 import type { ChatMessage } from '../../types/chat.ts';
 
 type MessageBubbleProps = {
@@ -6,6 +7,7 @@ type MessageBubbleProps = {
 
 function formatMessageTime(createdAt: string) {
   const date = new Date(createdAt);
+
   if (Number.isNaN(date.getTime())) {
     return '';
   }
@@ -31,24 +33,41 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   const time = formatMessageTime(message.createdAt);
 
   return (
-    <div className={`flex min-w-0 ${fromClinic ? 'justify-end' : 'justify-start'}`}>
+    <div
+      className={`flex min-w-0 items-end ${
+        fromClinic ? 'justify-end gap-2' : 'justify-start'
+      }`}
+    >
       <div
-        className={`min-w-0 max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-6 [overflow-wrap:anywhere] shadow-[0_5px_16px_rgba(46,70,77,0.04)] sm:max-w-[72%] ${
+        className={`min-w-0 max-w-[85%] rounded-2xl px-4 py-2.5 text-[13.5px] leading-[1.5] [overflow-wrap:anywhere] shadow-[0_4px_14px_rgba(46,70,77,0.035)] sm:text-sm md:min-w-[110px] md:[max-width:min(680px,62%)] ${
           fromClinic
             ? 'rounded-br-md bg-[var(--hera-blue-soft)] text-[var(--hera-text)]'
             : 'rounded-bl-md bg-white text-[var(--hera-text)] ring-1 ring-[var(--hera-border)]'
         }`}
       >
-        <p className="whitespace-pre-wrap break-words">{message.content}</p>
+        <p className="whitespace-pre-wrap break-words">
+          {message.content}
+        </p>
+
         {time ? (
           <time
             dateTime={message.createdAt}
-            className="mt-1 block text-right text-[10px] leading-none text-[var(--hera-muted)]"
+            className="mt-1 block text-right text-[10.5px] leading-none text-[var(--hera-muted)]"
           >
             {time}
           </time>
         ) : null}
       </div>
+
+      {fromClinic ? (
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white ring-1 ring-[var(--hera-border)]">
+          <img
+            src={heraLogo}
+            alt="Clínica Hera"
+            className="h-6 w-6 object-contain"
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
