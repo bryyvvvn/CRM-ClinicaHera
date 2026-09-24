@@ -26,11 +26,15 @@ export type MedilinkCita = {
   hora_fin?: string;
   duracion?: number;
   id_profesional?: number;
+  id_dentista?: number;
   nombre_profesional?: string;
+  nombre_dentista?: string;
   id_sucursal?: number;
   nombre_sucursal?: string;
   id_sillon?: number;
   comentarios?: string;
+  fecha_actualizacion?: string;
+  estado_anulacion?: number;
 };
 
 export type MedilinkAtencion = {
@@ -77,6 +81,7 @@ export type MedilinkEstadoCita = {
   nombre?: string;
   reservado?: number;
   anulacion?: number;
+  uso_interno?: number;
   habilitado?: number;
 };
 
@@ -128,6 +133,7 @@ export type CreateCitaInput = {
   id_estado?: number;
   duracion?: number;
   comentario?: string;
+  nueva_atencion?: boolean;
 };
 
 export type UpdateCitaInput = {
@@ -136,4 +142,14 @@ export type UpdateCitaInput = {
   duracion?: number;
   comentario?: string;
   citas_relacionadas?: number;
+};
+
+export type ChangeCitaInput = {
+  id_cita: number;
+  fecha?: string;
+  hora_inicio?: string;
+  duracion?: number;
+  id_profesional?: number;
+  nombre_profesional?: string;
+  id_sillon?: number;
 };

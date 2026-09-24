@@ -1,6 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { MessageRole } from '@prisma/client';
+import { AiService } from '../ai/ai.service.js';
 import { ChatGateway } from '../chat/chat.gateway.js';
 import { ChatService } from '../chat/chat.service.js';
+import { WhatsappApiClient } from './whatsapp-api.client.js';
 import type { WhatsappWebhookPayload } from './whatsapp.types.js';
 
 @Injectable()
@@ -10,6 +13,8 @@ export class WhatsappService {
   constructor(
     private readonly chatService: ChatService,
     private readonly chatGateway: ChatGateway,
+    private readonly aiService: AiService,
+    private readonly whatsappApi: WhatsappApiClient,
   ) {}
 
   async handleIncomingWebhook(payload: unknown): Promise<void> {
@@ -48,8 +53,51 @@ export class WhatsappService {
           });
 
           this.chatGateway.notifyIncoming(result.conversation, result.message);
+
+          if (result.isNew && result.conversation.isAiActive) {
+            await this.replyWithAi(result.conversation);
+          }
         }
       }
+    }
+  }
+
+  private async replyWithAi(
+    conversation: {
+      id: string;
+      phone: string;
+      patientName: string;
+      isAiActive: boolean;
+    },
+  ): Promise<void> {
+    try {
+      const reply = await this.aiService.replyToConversation({
+        ...conversation,
+        lastMessage: '',
+      });
+      const wamid = await this.whatsappApi.sendText(conversation.phone, reply);
+      const saved = await this.chatService.createMessage(
+        conversation.id,
+        MessageRole.assistant,
+        reply,
+        wamid,
+      );
+      this.chatGateway.notifyIncoming(
+        { ...conversation, lastMessage: reply },
+        this.chatService.toChatMessage(saved),
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Error desconocido';
+      this.logger.error(`AI reply failed: ${detail}`);
+      const failed = await this.chatService.createMessage(
+        conversation.id,
+        MessageRole.system,
+        `La IA no pudo responder. ${detail}`,
+      );
+      this.chatGateway.notifyIncoming(
+        { ...conversation, lastMessage: failed.content },
+        this.chatService.toChatMessage(failed),
+      );
     }
   }
 }

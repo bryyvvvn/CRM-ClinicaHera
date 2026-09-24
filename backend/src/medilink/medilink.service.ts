@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { AxiosError } from 'axios';
 import { firstValueFrom } from 'rxjs';
 import type {
+  ChangeCitaInput,
   CreateCitaInput,
   CreatePacienteInput,
   FindPacientesQuery,
@@ -22,6 +23,7 @@ import type {
 } from './medilink.types.js';
 
 const DEFAULT_BASE_URL = 'https://api.medilink2.healthatom.com/api/v5';
+const DENTALINK_WRITE_URL = 'https://api.dentalink.healthatom.com/api/v1';
 const DEFAULT_DURATION = 30;
 
 @Injectable()
@@ -83,7 +85,11 @@ export class MedilinkService {
   }
 
   listCitasPaciente(idPaciente: number): Promise<MedilinkCita[]> {
-    return this.getList<MedilinkCita>(`/pacientes/${idPaciente}/citas`);
+    return this.getList<MedilinkCita>(
+      `/pacientes/${idPaciente}/citas`,
+      undefined,
+      this.writeBaseUrl(),
+    );
   }
 
   listCitas(): Promise<MedilinkCita[]> {
@@ -94,8 +100,16 @@ export class MedilinkService {
     return this.getOne<MedilinkCita>(`/citas/${id}`);
   }
 
+  private getCitaWrite(id: number): Promise<MedilinkCita> {
+    return this.request<MedilinkCita>('GET', `/citas/${id}`, { baseUrl: this.writeBaseUrl() });
+  }
+
   listAtencionesPaciente(idPaciente: number): Promise<MedilinkAtencion[]> {
     return this.getList<MedilinkAtencion>(`/pacientes/${idPaciente}/atenciones`);
+  }
+
+  listTratamientosPaciente(idPaciente: number): Promise<MedilinkAtencion[]> {
+    return this.tryList<MedilinkAtencion>(`/pacientes/${idPaciente}/tratamientos`);
   }
 
   listSucursales(): Promise<MedilinkSucursal[]> {
@@ -115,20 +129,82 @@ export class MedilinkService {
   }
 
   listEstadosCita(): Promise<MedilinkEstadoCita[]> {
-    return this.getList<MedilinkEstadoCita>('/citas/estados');
+    return this.getList<MedilinkEstadoCita>('/citas/estados', undefined, this.writeBaseUrl());
   }
 
   getProximosCupos(idEspecialidad: number): Promise<MedilinkCupo[]> {
-    return this.getList<MedilinkCupo>(`/especialidades/${idEspecialidad}/proxima`);
+    return this.getList<MedilinkCupo>(
+      `/especialidades/${idEspecialidad}/proxima`,
+      undefined,
+      this.writeBaseUrl(),
+    ).then(normalizeCupos);
   }
 
-  getAgenda(query: GetAgendaQuery): Promise<MedilinkCupo[]> {
-    return this.getList<MedilinkCupo>('/agendas', {
-      fecha: query.fecha,
-      duracion: query.duracion ?? DEFAULT_DURATION,
-      ...(query.id_sucursal ? { id_sucursal: query.id_sucursal } : {}),
-      ...(query.id_profesional ? { id_profesional: query.id_profesional } : {}),
-    });
+  async getAgenda(query: GetAgendaQuery): Promise<MedilinkCupo[]> {
+    const profesionalId =
+      query.id_profesional ??
+      this.optionalNumber('MEDILINK_DEFAULT_PROFESIONAL_ID') ??
+      (await this.resolveProfesionalId({}));
+    const duracion = query.duracion ?? DEFAULT_DURATION;
+    const host = this.writeBaseUrl();
+    const sucursales = query.id_sucursal
+      ? [query.id_sucursal]
+      : [
+          await this.resolveProfesionalSucursal(profesionalId),
+          this.optionalNumber('MEDILINK_DEFAULT_SUCURSAL_ID'),
+          (await this.firstSucursal()).id,
+        ].filter((id, index, all): id is number => id !== undefined && all.indexOf(id) === index);
+
+    for (const sucursalId of sucursales) {
+      try {
+        const slots = normalizeCupos(
+          await this.getList<Record<string, unknown>>(
+            '/agendas',
+            {
+              id_sucursal: { eq: sucursalId },
+              fecha: { eq: query.fecha },
+              duracion: { eq: duracion },
+              id_dentista: { eq: profesionalId },
+            },
+            host,
+          ),
+        ).filter((slot) => !slot.id_profesional || slot.id_profesional === profesionalId);
+        if (slots.length) {
+          return slots;
+        }
+      } catch (error) {
+        this.logger.warn(
+          `GET /agendas sucursal=${sucursalId} falló (${error instanceof Error ? error.message : 'error'})`,
+        );
+      }
+
+      try {
+        const grid = await this.request<unknown>(
+          'GET',
+          `/sucursales/${sucursalId}/dentistas/${profesionalId}/agendas`,
+          {
+            filter: {
+              fecha_inicio: { eq: query.fecha },
+              fecha_fin: { eq: query.fecha },
+              mostrar_detalles: { eq: 0 },
+            },
+            baseUrl: host,
+          },
+        );
+        const slots = flattenDentistAgenda(grid, query.fecha, profesionalId, duracion);
+        if (slots.length) {
+          return slots;
+        }
+      } catch (error) {
+        this.logger.warn(
+          `GET agenda dentista=${profesionalId} sucursal=${sucursalId} falló (${
+            error instanceof Error ? error.message : 'error'
+          })`,
+        );
+      }
+    }
+
+    return [];
   }
 
   async createCita(input: CreateCitaInput): Promise<MedilinkCita> {
@@ -146,23 +222,22 @@ export class MedilinkService {
       input.id_estado ??
       this.optionalNumber('MEDILINK_ESTADO_NUEVA_CITA') ??
       (await this.findEstadoId('no confirmado', false));
-    const atencionId = input.id_atencion ?? (await this.latestOpenAtencionId(paciente.id));
+    const tratamientoId =
+      input.id_atencion ??
+      (input.nueva_atencion
+        ? await this.createTratamiento(paciente.id, sucursalId, profesionalId)
+        : (await this.latestOpenAtencionId(paciente.id)) ??
+          (await this.createTratamiento(paciente.id, sucursalId, profesionalId)));
     const duracion = input.duracion ?? DEFAULT_DURATION;
-
-    if (!atencionId) {
-      throw new HttpException(
-        'El paciente no tiene una atención abierta en MediLink; no se puede crear la cita',
-        422,
-      );
-    }
-
     const body = {
       id_profesional: profesionalId,
+      id_dentista: profesionalId,
       id_sucursal: sucursalId,
       id_estado: estadoId,
       id_sillon: sillonId,
       id_paciente: paciente.id,
-      id_atencion: atencionId,
+      id_atencion: tratamientoId,
+      id_tratamiento: tratamientoId,
       fecha: input.fecha,
       hora_inicio: normalizeTime(input.hora_inicio),
       duracion,
@@ -172,7 +247,16 @@ export class MedilinkService {
     this.logger.log(
       `MediLink POST /citas paciente=${paciente.id} fecha=${body.fecha} hora=${body.hora_inicio}`,
     );
-    return this.post<MedilinkCita>('/citas', body);
+
+    try {
+      return await this.post<MedilinkCita>('/citas/', body);
+    } catch (error) {
+      if (!this.isDentalBranchError(error)) {
+        throw error;
+      }
+      this.logger.warn('POST /citas rechazado en MediLink v5; reintento Dentalink v1');
+      return this.post<MedilinkCita>('/citas/', body, this.writeBaseUrl());
+    }
   }
 
   async updateCita(input: UpdateCitaInput): Promise<MedilinkCita> {
@@ -184,14 +268,96 @@ export class MedilinkService {
       body.duracion = input.duracion;
     }
     if (input.comentario !== undefined) {
-      body.comentario = input.comentario;
+      body.comentarios = input.comentario;
     }
     if (input.citas_relacionadas !== undefined) {
       body.citas_relacionadas = input.citas_relacionadas;
     }
 
     this.logger.log(`MediLink PUT /citas/${input.id_cita}`);
-    return this.put<MedilinkCita>(`/citas/${input.id_cita}`, body);
+    return this.put<MedilinkCita>(`/citas/${input.id_cita}`, body, this.writeBaseUrl());
+  }
+
+  async changeCita(input: ChangeCitaInput): Promise<MedilinkCita> {
+    const current = await this.getCitaWrite(input.id_cita);
+    let profesionalId = input.id_profesional;
+    if (!profesionalId && input.nombre_profesional) {
+      profesionalId = await this.resolveProfesionalId({
+        nombre_profesional: input.nombre_profesional,
+      });
+    }
+    profesionalId = profesionalId ?? current.id_profesional ?? current.id_dentista;
+    if (!profesionalId) {
+      throw new HttpException('Falta el profesional para cambiar la cita', 400);
+    }
+
+    const fecha = input.fecha ?? current.fecha;
+    const hora = normalizeTime(input.hora_inicio ?? current.hora_inicio ?? '');
+    if (!fecha || !hora) {
+      throw new HttpException('cambiarCita requiere fecha y hora_inicio', 400);
+    }
+
+    const base = {
+      id_sesion: current.id,
+      id_dentista: profesionalId,
+      fecha,
+      hora_inicio: hora,
+      duracion: input.duracion ?? current.duracion ?? DEFAULT_DURATION,
+      buscar_especialidad: 0,
+      return_options: 0,
+    };
+
+    const sillonIds: Array<number | undefined> = [
+      input.id_sillon ?? current.id_sillon ?? 1,
+    ];
+
+    let lastError: unknown;
+    for (const sillonId of sillonIds) {
+      const body =
+        sillonId === undefined ? { ...base } : { ...base, id_sillon: sillonId };
+      try {
+        this.logger.log(
+          `MediLink POST /citas/changeDate cita=${current.id} fecha=${fecha} hora=${hora} dentista=${profesionalId} sillon=${sillonId ?? 'auto'}`,
+        );
+        return await this.post<MedilinkCita>('/citas/changeDate', body, this.writeBaseUrl());
+      } catch (error) {
+        if (!this.isSillonChangeError(error)) {
+          throw error;
+        }
+        lastError = error;
+        this.logger.warn(
+          `changeDate sin cupo de sillón (${sillonId ?? 'auto'}); pruebo otro`,
+        );
+      }
+    }
+
+    const targetSucursal = await this.resolveProfesionalSucursal(
+      profesionalId,
+      current.id_sucursal,
+    );
+    this.logger.warn(
+      `changeDate sin sillón; muevo cita=${current.id} a sucursal=${targetSucursal} profesional=${profesionalId}`,
+    );
+    const created = await this.createCita({
+      fecha,
+      hora_inicio: hora,
+      id_paciente: current.id_paciente,
+      id_profesional: profesionalId,
+      id_sucursal: targetSucursal,
+      id_sillon: typeof sillonIds[0] === 'number' ? sillonIds[0] : current.id_sillon,
+      comentario: 'Cambio de profesional por WhatsApp',
+      nueva_atencion: true,
+    });
+    try {
+      await this.anularCita(current.id);
+    } catch (error) {
+      this.logger.warn(
+        `Cita nueva ${created.id} creada pero no pude anular ${current.id}: ${
+          error instanceof Error ? error.message : 'error'
+        }`,
+      );
+    }
+    return created;
   }
 
   async confirmarCita(idCita: number): Promise<MedilinkCita> {
@@ -206,14 +372,41 @@ export class MedilinkService {
   }
 
   async anularCita(idCita: number): Promise<MedilinkCita> {
-    const idEstado =
-      this.optionalNumber('MEDILINK_ESTADO_ANULADA') ??
-      (await this.findEstadoId('anul', true));
-    return this.updateCita({
-      id_cita: idCita,
-      id_estado: idEstado,
-      comentario: 'Anulada por WhatsApp',
-    });
+    const configured = this.optionalNumber('MEDILINK_ESTADO_ANULADA');
+    const estadoIds = configured
+      ? [configured]
+      : await this.findAnulacionEstadoIds();
+    if (!estadoIds.length) {
+      throw new HttpException(
+        'No hay un estado de anulación usable por API. Crea uno personalizado en Dentalink (Anulación=Sí, no reservado).',
+        422,
+      );
+    }
+
+    let lastError: unknown;
+    for (const idEstado of estadoIds) {
+      try {
+        this.logger.log(`MediLink anular cita=${idCita} estado=${idEstado}`);
+        return await this.updateCita({
+          id_cita: idCita,
+          id_estado: idEstado,
+          comentario: 'Anulada por WhatsApp',
+        });
+      } catch (error) {
+        if (!this.isReservedEstadoError(error)) {
+          throw error;
+        }
+        lastError = error;
+        this.logger.warn(`Estado ${idEstado} reservado; pruebo otro`);
+      }
+    }
+
+    throw lastError instanceof HttpException
+      ? lastError
+      : new HttpException(
+          'No se pudo anular: Dentalink rechazó los estados de anulación.',
+          422,
+        );
   }
 
   private async resolvePaciente(input: CreateCitaInput): Promise<MedilinkPaciente> {
@@ -233,7 +426,9 @@ export class MedilinkService {
     return matches[0];
   }
 
-  private async resolveProfesionalId(input: CreateCitaInput): Promise<number> {
+  private async resolveProfesionalId(
+    input: Pick<CreateCitaInput, 'id_profesional' | 'nombre_profesional'>,
+  ): Promise<number> {
     if (input.id_profesional) {
       return input.id_profesional;
     }
@@ -261,6 +456,38 @@ export class MedilinkService {
     throw new HttpException('No hay profesionales habilitados en MediLink', 422);
   }
 
+  private async resolveProfesionalSucursal(
+    profesionalId: number,
+    currentSucursal?: number,
+  ): Promise<number> {
+    try {
+      const horarios = await this.getList<Record<string, unknown>>(
+        `/dentistas/${profesionalId}/horarios`,
+        undefined,
+        this.writeBaseUrl(),
+      );
+      const sucursalIds = horarios
+        .map((row) => asOptionalNumber(row.id_sucursal))
+        .filter((id): id is number => id !== undefined);
+      if (currentSucursal && sucursalIds.includes(currentSucursal)) {
+        return currentSucursal;
+      }
+      if (sucursalIds[0]) {
+        return sucursalIds[0];
+      }
+    } catch (error) {
+      this.logger.warn(
+        `No pude leer horarios del profesional ${profesionalId}: ${
+          error instanceof Error ? error.message : 'error'
+        }`,
+      );
+    }
+
+    const sucursales = await this.listSucursales();
+    const other = sucursales.find((item) => item.id !== currentSucursal && item.habilitada !== 0);
+    return other?.id ?? currentSucursal ?? (await this.firstSucursal()).id;
+  }
+
   private async firstSucursal(): Promise<MedilinkSucursal> {
     const sucursales = await this.listSucursales();
     const match = sucursales.find((item) => item.habilitada !== 0) ?? sucursales[0];
@@ -272,31 +499,107 @@ export class MedilinkService {
 
   private async firstSillon(): Promise<MedilinkSillon> {
     const sillones = await this.listSillones();
-    if (!sillones[0]) {
+    const named = sillones.find((item) => /sill[oó]n\s*1$/i.test(item.nombre ?? ''));
+    const lowest = [...sillones].sort((left, right) => left.id - right.id)[0];
+    const match = named ?? (lowest && lowest.id < 100 ? lowest : undefined) ?? {
+      id: 1,
+      nombre: 'Sillon 1',
+    };
+    if (!match) {
       throw new HttpException('No hay sillones en MediLink', 422);
     }
-    return sillones[0];
+    return match;
   }
 
   private async latestOpenAtencionId(idPaciente: number): Promise<number | undefined> {
     const atenciones = await this.listAtencionesPaciente(idPaciente);
-    const open = atenciones.find((item) => item.finalizado !== 1 && item.bloqueado !== 1);
-    return open?.id ?? atenciones[0]?.id;
+    const tratamientos = await this.listTratamientosPaciente(idPaciente);
+    const pool = [...atenciones, ...tratamientos];
+    const open = pool.find((item) => item.finalizado !== 1 && item.bloqueado !== 1);
+    return open?.id ?? pool[0]?.id;
+  }
+
+  private async createTratamiento(
+    idPaciente: number,
+    idSucursal: number,
+    idProfesional: number,
+  ): Promise<number> {
+    const created = await this.post<MedilinkAtencion>(
+      '/tratamientos/',
+      {
+        id_sucursal: idSucursal,
+        id_paciente: idPaciente,
+        id_dentista: idProfesional,
+        id_profesional: idProfesional,
+        nombre: 'Consulta WhatsApp',
+      },
+      this.writeBaseUrl(),
+    );
+    if (!created?.id) {
+      throw new HttpException('No se pudo crear el tratamiento para la cita', 422);
+    }
+    return created.id;
+  }
+
+  private writeBaseUrl(): string {
+    const configured = this.configService.get<string>('MEDILINK_WRITE_BASE_URL')?.trim();
+    if (configured) {
+      return configured.replace(/\/$/, '');
+    }
+    const { baseUrl } = this.credentials();
+    if (baseUrl.includes('medilink2')) {
+      return DENTALINK_WRITE_URL;
+    }
+    return baseUrl;
+  }
+
+  private isDentalBranchError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /sucursal dental|412/i.test(message);
   }
 
   private async findEstadoId(needle: string, preferAnulacion: boolean): Promise<number> {
-    const estados = await this.listEstadosCita();
-    const folded = fold(needle);
-    const match = preferAnulacion
-      ? estados.find((item) => item.anulacion === 1) ??
-        estados.find((item) => fold(item.nombre ?? '').includes(folded))
-      : estados.find(
-          (item) => item.anulacion !== 1 && fold(item.nombre ?? '').includes(folded),
-        );
-    if (!match) {
+    const ids = preferAnulacion
+      ? await this.findAnulacionEstadoIds()
+      : (await this.writableEstados())
+          .filter((item) => item.anulacion !== 1 && fold(item.nombre ?? '').includes(fold(needle)))
+          .map((item) => item.id);
+    if (!ids[0]) {
       throw new HttpException(`No se encontró un estado de cita para "${needle}"`, 422);
     }
-    return match.id;
+    return ids[0];
+  }
+
+  private async findAnulacionEstadoIds(): Promise<number[]> {
+    const writable = await this.writableEstados();
+    const cancel = writable.filter(
+      (item) => item.anulacion === 1 || fold(item.nombre ?? '').includes('anul'),
+    );
+    const ranked = [...cancel].sort((left, right) => {
+      const leftName = fold(left.nombre ?? '');
+      const rightName = fold(right.nombre ?? '');
+      return scoreAnulacionNombre(leftName) - scoreAnulacionNombre(rightName);
+    });
+    return ranked.map((item) => item.id);
+  }
+
+  private async writableEstados(): Promise<MedilinkEstadoCita[]> {
+    const estados = await this.listEstadosCita();
+    const writable = estados.filter(
+      (item) =>
+        item.habilitado !== 0 && item.reservado !== 1 && item.uso_interno !== 1,
+    );
+    return writable.length ? writable : estados.filter((item) => item.habilitado !== 0);
+  }
+
+  private isReservedEstadoError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /reservado|uso interno/i.test(message);
+  }
+
+  private isSillonChangeError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /sillon/i.test(message);
   }
 
   private optionalNumber(key: string): number | undefined {
@@ -308,8 +611,12 @@ export class MedilinkService {
     return Number.isFinite(value) ? value : undefined;
   }
 
-  private getList<T>(path: string, filter?: Record<string, unknown>): Promise<T[]> {
-    return this.request<T[]>('GET', path, { filter, expectList: true });
+  private getList<T>(
+    path: string,
+    filter?: Record<string, unknown>,
+    baseUrl?: string,
+  ): Promise<T[]> {
+    return this.request<T[]>('GET', path, { filter, expectList: true, baseUrl });
   }
 
   private async tryList<T>(path: string, filter?: Record<string, unknown>): Promise<T[]> {
@@ -326,12 +633,20 @@ export class MedilinkService {
     return this.request<T>('GET', path);
   }
 
-  private post<T>(path: string, body: Record<string, unknown>): Promise<T> {
-    return this.request<T>('POST', path, { body });
+  private post<T>(
+    path: string,
+    body: Record<string, unknown>,
+    baseUrl?: string,
+  ): Promise<T> {
+    return this.request<T>('POST', path, { body, baseUrl });
   }
 
-  private put<T>(path: string, body: Record<string, unknown>): Promise<T> {
-    return this.request<T>('PUT', path, { body });
+  private put<T>(
+    path: string,
+    body: Record<string, unknown>,
+    baseUrl?: string,
+  ): Promise<T> {
+    return this.request<T>('PUT', path, { body, baseUrl });
   }
 
   private credentials() {
@@ -354,10 +669,12 @@ export class MedilinkService {
       filter?: Record<string, unknown>;
       body?: Record<string, unknown>;
       expectList?: boolean;
+      baseUrl?: string;
     },
   ): Promise<T> {
     const { token, baseUrl } = this.credentials();
-    const url = `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+    const host = (options?.baseUrl ?? baseUrl).replace(/\/$/, '');
+    const url = `${host}${path.startsWith('/') ? path : `/${path}`}`;
 
     try {
       const response = await firstValueFrom(
@@ -396,6 +713,82 @@ export class MedilinkService {
     this.logger.error(`MediLink ${method} ${path} failed: ${detail}`);
     return new HttpException(`MediLink ${method} ${path}: ${detail}`, status);
   }
+}
+
+function normalizeCupos(items: Array<Record<string, unknown> | MedilinkCupo>): MedilinkCupo[] {
+  return items
+    .map((item) => {
+      const row = item as Record<string, unknown>;
+      return {
+        id_paciente: asOptionalNumber(row.id_paciente),
+        hora_inicio: asOptionalString(row.hora_inicio),
+        hora_fin: asOptionalString(row.hora_fin),
+        duracion: asOptionalNumber(row.duracion),
+        id_profesional:
+          asOptionalNumber(row.id_profesional) ?? asOptionalNumber(row.id_dentista),
+        nombre_profesional:
+          asOptionalString(row.nombre_profesional) ?? asOptionalString(row.nombre_dentista),
+        fecha: asOptionalString(row.fecha),
+        id_recurso: asOptionalNumber(row.id_recurso),
+      };
+    })
+    .filter((item) => !item.id_paciente);
+}
+
+function flattenDentistAgenda(
+  payload: unknown,
+  fecha: string,
+  idProfesional: number,
+  duracion: number,
+): MedilinkCupo[] {
+  const root =
+    payload && typeof payload === 'object' && 'data' in payload
+      ? (payload as { data?: unknown }).data
+      : payload;
+  const fechas =
+    root && typeof root === 'object' && 'fechas' in root
+      ? (root as { fechas?: Record<string, { horas?: Record<string, { sillones?: Record<string, unknown> }> }> })
+          .fechas
+      : undefined;
+  if (!fechas) {
+    return [];
+  }
+
+  const slots: MedilinkCupo[] = [];
+  for (const [day, dayValue] of Object.entries(fechas)) {
+    if (day !== fecha && !day.includes(fecha.slice(8))) {
+      continue;
+    }
+    for (const [hora, slot] of Object.entries(dayValue.horas ?? {})) {
+      const free = Object.entries(slot.sillones ?? {}).some(
+        ([key, value]) => key !== 'Sobrecupo' && value === true,
+      );
+      if (free) {
+        slots.push({
+          fecha: day,
+          hora_inicio: hora,
+          duracion,
+          id_profesional: idProfesional,
+        });
+      }
+    }
+  }
+  return slots.length ? slots : [];
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function asOptionalNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
 }
 
 function unwrap<T>(payload: MedilinkList<T> | T, expectList?: boolean): T | T[] {
@@ -446,4 +839,14 @@ function fold(value: string): string {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .trim();
+}
+
+function scoreAnulacionNombre(nombre: string): number {
+  if (/whatsapp|email|correo|paciente|pte/.test(nombre)) {
+    return 0;
+  }
+  if (nombre === 'anulado') {
+    return 1;
+  }
+  return 2;
 }

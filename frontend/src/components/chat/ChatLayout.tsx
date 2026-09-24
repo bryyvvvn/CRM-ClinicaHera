@@ -38,7 +38,13 @@ export function ChatLayout() {
       const index = current.findIndex((item) => item.id === incomingConversation.id);
       if (index >= 0) {
         const next = [...current];
-        next[index] = { ...next[index], ...incomingConversation };
+        next[index] = {
+          ...next[index],
+          ...incomingConversation,
+          patientName:
+            incomingConversation.patientName || next[index].patientName,
+          phone: incomingConversation.phone || next[index].phone,
+        };
         const [updated] = next.splice(index, 1);
         return [updated, ...next];
       }

@@ -77,7 +77,11 @@ export class ChatService {
     name?: string;
     content: string;
     externalId?: string;
-  }): Promise<{ conversation: ConversationDto; message: ChatMessageDto }> {
+  }): Promise<{
+    conversation: ConversationDto;
+    message: ChatMessageDto;
+    isNew: boolean;
+  }> {
     if (input.externalId) {
       const existing = await this.prisma.message.findUnique({
         where: { externalId: input.externalId },
@@ -91,6 +95,7 @@ export class ChatService {
             existing.content,
           ),
           message: this.toMessageDto(existing),
+          isNew: false,
         };
       }
     }
@@ -122,6 +127,7 @@ export class ChatService {
     return {
       conversation: this.toConversation(session, patient, message.content),
       message: this.toMessageDto(message),
+      isNew: true,
     };
   }
 

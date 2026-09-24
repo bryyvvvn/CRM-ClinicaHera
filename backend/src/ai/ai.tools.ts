@@ -5,6 +5,7 @@ export type AiToolName =
   | 'crearCita'
   | 'confirmarCita'
   | 'anularCita'
+  | 'cambiarCita'
   | 'crearPaciente';
 
 export type AiToolDefinition = {
@@ -112,11 +113,32 @@ export const AI_TOOLS: AiToolDefinition[] = [
     type: 'function',
     function: {
       name: 'anularCita',
-      description: 'Anula una cita. Si no hay id_cita, usa la próxima del paciente.',
+      description:
+        'Anula una cita en MediLink. Obligatorio cuando el paciente confirma que quiere cancelar. No digas que quedó anulada sin llamar esta tool. Si no hay id_cita, usa la próxima del paciente.',
       parameters: {
         type: 'object',
         properties: {
           id_cita: { type: 'number' },
+          id_paciente: { type: 'number' },
+          celular: { type: 'string' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'cambiarCita',
+      description:
+        'Reprograma una cita existente (hora, fecha o profesional) sin anularla. Usar cuando el paciente quiere cambiar la hora o el profesional. Si no hay id_cita, usa la próxima del paciente.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id_cita: { type: 'number' },
+          fecha: { type: 'string', description: 'YYYY-MM-DD' },
+          hora_inicio: { type: 'string', description: 'HH:mm' },
+          id_profesional: { type: 'number' },
+          nombre_profesional: { type: 'string' },
           id_paciente: { type: 'number' },
           celular: { type: 'string' },
         },

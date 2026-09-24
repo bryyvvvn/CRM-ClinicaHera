@@ -23,4 +23,15 @@ export class AiController {
       { celular: body.celular },
     );
   }
+
+  @Post('complete')
+  complete(@Body() body: { message?: string; celular?: string }) {
+    const message = body.message?.trim();
+    if (!message) {
+      return { error: 'Falta message' };
+    }
+    return this.aiService
+      .complete(message, { celular: body.celular })
+      .then((reply) => ({ reply }));
+  }
 }
