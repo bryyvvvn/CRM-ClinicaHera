@@ -43,7 +43,7 @@ export function ChatWindow({
 
   if (!conversation) {
     return (
-      <main className="flex h-full min-h-0 min-w-0 w-full flex-1 items-center justify-center overflow-hidden bg-[var(--hera-background)] px-6 text-center">
+      <main className="flex h-full min-h-0 min-w-0 w-full flex-1 items-center justify-center overflow-hidden bg-[var(--hera-chat-background)] px-6 text-center">
         <div>
           <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-[var(--hera-surface)] text-[var(--hera-blue)] shadow-sm ring-1 ring-[var(--hera-border)]">
             <MessageCircle size={27} strokeWidth={1.6} aria-hidden="true" />
@@ -68,13 +68,13 @@ export function ChatWindow({
   };
 
   return (
-    <main className="flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden bg-[var(--hera-background)]">
+    <main className="flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden bg-[var(--hera-chat-background)]">
       <header className="flex min-h-[76px] min-w-0 w-full items-center justify-between gap-3 overflow-hidden border-b border-[var(--hera-border)] bg-[var(--hera-surface)] px-3 py-3 sm:px-5">
         <div className="flex min-w-0 items-center gap-3">
           <button
             type="button"
             onClick={onBack}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--hera-muted)] hover:bg-[var(--hera-background)] md:hidden"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--hera-muted)] hover:bg-[var(--hera-chat-background)] md:hidden"
             aria-label="Volver a conversaciones"
           >
             <ArrowLeft size={19} aria-hidden="true" />
@@ -156,7 +156,7 @@ export function ChatWindow({
           onChange={(event) => setDraft(event.target.value)}
           placeholder="Escribe un mensaje..."
           autoComplete="off"
-          className="h-12 min-w-0 flex-1 rounded-2xl border border-[var(--hera-border)] bg-[var(--hera-background)] px-4 text-sm text-[var(--hera-text)] outline-none transition placeholder:text-[var(--hera-placeholder)] focus:border-[var(--hera-blue)] focus:bg-[var(--hera-surface)] focus:ring-4 focus:ring-[var(--hera-blue-soft)]"
+          className="h-12 min-w-0 flex-1 rounded-2xl border border-[var(--hera-border)] bg-[var(--hera-chat-background)] px-4 text-sm text-[var(--hera-text)] outline-none transition placeholder:text-[var(--hera-placeholder)] focus:border-[var(--hera-blue)] focus:bg-[var(--hera-surface)] focus:ring-4 focus:ring-[var(--hera-blue-soft)]"
         />
         <button
           type="submit"
