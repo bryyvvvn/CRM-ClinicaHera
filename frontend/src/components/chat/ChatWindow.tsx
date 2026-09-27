@@ -1,9 +1,10 @@
 import { ArrowLeft, Bot, MessageCircle, Pause, Play, Send, UserRound } from 'lucide-react';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { Fragment, useEffect, useRef, useState, type FormEvent } from 'react';
 import { formatChileanPhone } from '../../utils/formatPhone.ts';
 import type { ChatMessage, Conversation } from '../../types/chat.ts';
 import { WhatsAppIcon } from '../icons/WhatsAppIcon.tsx';
 import { MessageBubble } from './MessageBubble.tsx';
+import { DateSeparator, getMessageDateKey } from './DataSeparator.tsx';
 
 type ChatWindowProps = {
   conversation?: Conversation;
@@ -135,10 +136,34 @@ export function ChatWindow({
       <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2.5 overflow-x-hidden overflow-y-auto px-4 py-5 sm:gap-3 sm:px-6 sm:py-6 lg:px-8">
         {messages.length === 0 ? (
           <div className="flex flex-1 items-center justify-center text-center">
-            <p className="text-xs text-[var(--hera-muted)]">Aún no hay mensajes en esta conversación.</p>
+            <p className="text-xs text-[var(--hera-muted)]">
+              Aún no hay mensajes en esta conversación.
+            </p>
           </div>
         ) : (
-          messages.map((message) => <MessageBubble key={message.id} message={message} />)
+          messages.map((message, index) => {
+            const previousMessage = messages[index - 1];
+
+            const currentDateKey = getMessageDateKey(message.createdAt);
+
+            const previousDateKey = previousMessage
+              ? getMessageDateKey(previousMessage.createdAt)
+              : null;
+
+            const showDateSeparator =
+              !previousMessage ||
+              currentDateKey !== previousDateKey;
+
+            return (
+              <Fragment key={message.id}>
+                {showDateSeparator ? (
+                  <DateSeparator date={message.createdAt} />
+                ) : null}
+
+                <MessageBubble message={message} />
+              </Fragment>
+            );
+          })
         )}
         <div ref={messagesEndRef} />
       </div>
