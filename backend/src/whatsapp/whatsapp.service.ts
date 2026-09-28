@@ -1,0 +1,103 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { MessageRole } from '@prisma/client';
+import { AiService } from '../ai/ai.service.js';
+import { ChatGateway } from '../chat/chat.gateway.js';
+import { ChatService } from '../chat/chat.service.js';
+import { WhatsappApiClient } from './whatsapp-api.client.js';
+import type { WhatsappWebhookPayload } from './whatsapp.types.js';
+
+@Injectable()
+export class WhatsappService {
+  private readonly logger = new Logger(WhatsappService.name);
+
+  constructor(
+    private readonly chatService: ChatService,
+    private readonly chatGateway: ChatGateway,
+    private readonly aiService: AiService,
+    private readonly whatsappApi: WhatsappApiClient,
+  ) {}
+
+  async handleIncomingWebhook(payload: unknown): Promise<void> {
+    const body = payload as WhatsappWebhookPayload;
+
+    for (const entry of body.entry ?? []) {
+      for (const change of entry.changes ?? []) {
+        const value = change.value;
+        if (!value?.messages?.length) {
+          continue;
+        }
+
+        const nameByWaId = new Map(
+          (value.contacts ?? [])
+            .filter((contact) => contact.wa_id)
+            .map((contact) => [contact.wa_id as string, contact.profile?.name]),
+        );
+
+        for (const incoming of value.messages) {
+          if (incoming.type !== 'text' || !incoming.from || !incoming.text?.body) {
+            this.logger.debug(
+              `Skipping WhatsApp message type=${incoming.type ?? 'unknown'}`,
+            );
+            continue;
+          }
+
+          this.logger.log(
+            `WhatsApp inbound from=${incoming.from} text="${incoming.text.body}"`,
+          );
+
+          const result = await this.chatService.ingestIncomingText({
+            phone: incoming.from,
+            name: nameByWaId.get(incoming.from),
+            content: incoming.text.body,
+            externalId: incoming.id,
+          });
+
+          this.chatGateway.notifyIncoming(result.conversation, result.message);
+
+          if (result.isNew && result.conversation.isAiActive) {
+            await this.replyWithAi(result.conversation);
+          }
+        }
+      }
+    }
+  }
+
+  private async replyWithAi(
+    conversation: {
+      id: string;
+      phone: string;
+      patientName: string;
+      isAiActive: boolean;
+    },
+  ): Promise<void> {
+    try {
+      const reply = await this.aiService.replyToConversation({
+        ...conversation,
+        lastMessage: '',
+      });
+      const wamid = await this.whatsappApi.sendText(conversation.phone, reply);
+      const saved = await this.chatService.createMessage(
+        conversation.id,
+        MessageRole.assistant,
+        reply,
+        wamid,
+      );
+      this.chatGateway.notifyIncoming(
+        { ...conversation, lastMessage: reply },
+        this.chatService.toChatMessage(saved),
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Error desconocido';
+      this.logger.error(`AI reply failed: ${detail}`);
+      const failed = await this.chatService.createMessage(
+        conversation.id,
+        MessageRole.system,
+        `La IA no pudo responder. ${detail}`,
+      );
+      this.chatGateway.notifyIncoming(
+        { ...conversation, lastMessage: failed.content },
+        this.chatService.toChatMessage(failed),
+      );
+    }
+  }
+}
