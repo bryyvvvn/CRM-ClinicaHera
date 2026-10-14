@@ -20,6 +20,7 @@ export function useChatWebsocket(sessionId?: string) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [incomingConversation, setIncomingConversation] =
     useState<Conversation | null>(null);
+  const [assistantTyping, setAssistantTyping] = useState(false);
 
   sessionIdRef.current = sessionId;
 
@@ -49,6 +50,12 @@ export function useChatWebsocket(sessionId?: string) {
     socket.on('conversationUpserted', (conversation: Conversation) => {
       setIncomingConversation(conversation);
     });
+    socket.on('assistantTyping', (payload: { sessionId?: string; active?: boolean }) => {
+      if (payload.sessionId && payload.sessionId !== sessionIdRef.current) {
+        return;
+      }
+      setAssistantTyping(Boolean(payload.active));
+    });
 
     return () => {
       socket.disconnect();
@@ -60,6 +67,7 @@ export function useChatWebsocket(sessionId?: string) {
     const socket = socketRef.current;
     if (!sessionId) {
       setMessages([]);
+      setAssistantTyping(false);
       return;
     }
 
@@ -99,6 +107,13 @@ export function useChatWebsocket(sessionId?: string) {
     socketRef.current.emit('newMessage', { sessionId, role, content });
   };
 
+  const notifyTyping = () => {
+    if (!sessionId || !socketRef.current) {
+      return;
+    }
+    socketRef.current.emit('typing', { sessionId });
+  };
+
   const toggleAi = (isAiActive: boolean) => {
     if (!sessionId || !socketRef.current) {
       return;
@@ -111,7 +126,9 @@ export function useChatWebsocket(sessionId?: string) {
     connected,
     messages,
     incomingConversation,
+    assistantTyping,
     sendMessage,
+    notifyTyping,
     toggleAi,
   };
 }

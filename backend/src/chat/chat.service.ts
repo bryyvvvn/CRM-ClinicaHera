@@ -53,6 +53,25 @@ export class ChatService {
     return message;
   }
 
+  async isAiActive(sessionId: string): Promise<boolean> {
+    const session = await this.prisma.chatSession.findUnique({
+      where: { id: sessionId },
+    });
+    return session?.isAiActive ?? false;
+  }
+
+  async latestInboundExternalId(sessionId: string): Promise<string | null> {
+    const message = await this.prisma.message.findFirst({
+      where: {
+        chatSessionId: sessionId,
+        role: MessageRole.user,
+        externalId: { not: null },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    return message?.externalId ?? null;
+  }
+
   async getPatientPhone(sessionId: string): Promise<string | null> {
     const session = await this.prisma.chatSession.findUnique({
       where: { id: sessionId },

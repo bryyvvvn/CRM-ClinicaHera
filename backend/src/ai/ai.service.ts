@@ -42,9 +42,11 @@ export class AiService {
 
   async replyToConversation(conversation: ConversationDto): Promise<string> {
     const history = await this.chatService.findMessages(conversation.id);
-    const recent = history
-      .filter((message) => message.role === 'user' || message.role === 'assistant')
-      .slice(-HISTORY_LIMIT);
+    const recent = collapseUserRuns(
+      history
+        .filter((message) => message.role === 'user' || message.role === 'assistant')
+        .slice(-HISTORY_LIMIT),
+    );
 
     const lastUser = [...recent].reverse().find((message) => message.role === 'user');
     const lastAssistant = [...recent].reverse().find((message) => message.role === 'assistant');
@@ -816,6 +818,20 @@ function citaTimestamp(cita: MedilinkCita): number | undefined {
     : cita.fecha;
   const parsed = Date.parse(`${iso}T${time}:00`);
   return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+/** Varios mensajes seguidos del paciente cuentan como una sola idea. */
+function collapseUserRuns<T extends { role: string; content: string }>(messages: T[]): T[] {
+  const collapsed: T[] = [];
+  for (const message of messages) {
+    const previous = collapsed[collapsed.length - 1];
+    if (message.role === 'user' && previous?.role === 'user') {
+      previous.content = `${previous.content}\n${message.content}`;
+      continue;
+    }
+    collapsed.push({ ...message });
+  }
+  return collapsed;
 }
 
 function toIsoDate(value: string): string {

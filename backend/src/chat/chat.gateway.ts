@@ -45,6 +45,10 @@ export class ChatGateway {
     this.server.to(conversation.id).emit('newMessage', message);
   }
 
+  notifyTyping(sessionId: string, active: boolean): void {
+    this.server.emit('assistantTyping', { sessionId, active });
+  }
+
   @SubscribeMessage('joinSession')
   async joinSession(
     @ConnectedSocket() client: SocketClient,
@@ -104,6 +108,16 @@ export class ChatGateway {
     const dto = this.chatService.toChatMessage(saved);
     this.server.to(payload.sessionId).emit('newMessage', dto);
     return dto;
+  }
+
+  @SubscribeMessage('typing')
+  async typing(@MessageBody() payload: { sessionId: string }) {
+    const messageId = await this.chatService.latestInboundExternalId(payload.sessionId);
+    if (!messageId) {
+      return { ok: false };
+    }
+    await this.whatsappApi.showTyping(messageId);
+    return { ok: true };
   }
 
   @SubscribeMessage('toggleAi')

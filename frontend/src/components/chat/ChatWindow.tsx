@@ -13,6 +13,8 @@ type ChatWindowProps = {
   onBack: () => void;
   onToggleAi: (isAiActive: boolean) => void;
   onSend: (content: string) => void;
+  onTyping: () => void;
+  assistantTyping: boolean;
 };
 
 function getInitials(name: string) {
@@ -34,13 +36,29 @@ export function ChatWindow({
   onBack,
   onToggleAi,
   onSend,
+  onTyping,
+  assistantTyping,
 }: ChatWindowProps) {
   const [draft, setDraft] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lastTypingAt = useRef(0);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: 'end' });
-  }, [messages]);
+  }, [messages, assistantTyping]);
+
+  const handleDraftChange = (value: string) => {
+    setDraft(value);
+    if (!value.trim()) {
+      return;
+    }
+    const now = Date.now();
+    if (now - lastTypingAt.current < 4000) {
+      return;
+    }
+    lastTypingAt.current = now;
+    onTyping();
+  };
 
   if (!conversation) {
     return (
@@ -165,6 +183,13 @@ export function ChatWindow({
             );
           })
         )}
+        {assistantTyping ? (
+          <div className="flex justify-end">
+            <div className="rounded-2xl rounded-br-md bg-[var(--hera-chat-outgoing)] px-4 py-2.5 text-sm tracking-widest text-[var(--hera-muted)]">
+              .....
+            </div>
+          </div>
+        ) : null}
         <div ref={messagesEndRef} />
       </div>
 
@@ -178,7 +203,7 @@ export function ChatWindow({
         <input
           id="message-draft"
           value={draft}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(event) => handleDraftChange(event.target.value)}
           placeholder="Escribe un mensaje..."
           autoComplete="off"
           className="h-12 min-w-0 flex-1 rounded-2xl border border-[var(--hera-border)] bg-[var(--hera-chat-background)] px-4 text-sm text-[var(--hera-text)] outline-none transition placeholder:text-[var(--hera-placeholder)] focus:border-[var(--hera-blue)] focus:bg-[var(--hera-surface)] focus:ring-4 focus:ring-[var(--hera-blue-soft)]"

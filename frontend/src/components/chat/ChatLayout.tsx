@@ -15,8 +15,15 @@ export function ChatLayout({ searchQuery }: ChatLayoutProps) {
   const [selectedId, setSelectedId] = useState<string>();
   const [filter, setFilter] = useState<ConversationFilter>('all');
   const [mobileChatVisible, setMobileChatVisible] = useState(false);
-  const { connected, messages, incomingConversation, sendMessage, toggleAi } =
-    useChatWebsocket(selectedId);
+  const {
+    connected,
+    messages,
+    incomingConversation,
+    assistantTyping,
+    sendMessage,
+    notifyTyping,
+    toggleAi,
+  } = useChatWebsocket(selectedId);
 
   useEffect(() => {
     void fetch(`${API_URL}/chat/sessions`)
@@ -103,6 +110,8 @@ export function ChatLayout({ searchQuery }: ChatLayoutProps) {
           onBack={() => setMobileChatVisible(false)}
           onToggleAi={handleToggleAi}
           onSend={sendMessage}
+          onTyping={notifyTyping}
+          assistantTyping={assistantTyping}
         />
       </div>
     </div>
