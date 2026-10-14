@@ -14,7 +14,12 @@ export type WhatsappWebhookPayload = {
           type?: string;
           text?: { body?: string };
         }>;
-        statuses?: unknown[];
+        statuses?: Array<{
+          id?: string;
+          status?: string;
+          recipient_id?: string;
+          errors?: Array<{ code?: number; title?: string; message?: string }>;
+        }>;
       };
     }>;
   }>;

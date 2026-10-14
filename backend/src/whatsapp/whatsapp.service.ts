@@ -23,6 +23,15 @@ export class WhatsappService {
     for (const entry of body.entry ?? []) {
       for (const change of entry.changes ?? []) {
         const value = change.value;
+        for (const status of value?.statuses ?? []) {
+          const error = status.errors?.[0];
+          const detail = error
+            ? ` error=${error.code ?? ''} ${error.title ?? error.message ?? ''}`.trimEnd()
+            : '';
+          this.logger.log(
+            `WhatsApp status to=${status.recipient_id ?? '?'} status=${status.status ?? '?'} id=${status.id ?? '?'}${detail}`,
+          );
+        }
         if (!value?.messages?.length) {
           continue;
         }
