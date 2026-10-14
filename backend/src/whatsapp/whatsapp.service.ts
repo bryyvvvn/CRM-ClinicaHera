@@ -6,7 +6,7 @@ import { ChatService } from '../chat/chat.service.js';
 import { WhatsappApiClient } from './whatsapp-api.client.js';
 import type { WhatsappWebhookPayload } from './whatsapp.types.js';
 
-const REPLY_QUIET_MS = 10_000;
+const REPLY_QUIET_MS = 6_000;
 
 type PendingReply = {
   timer: ReturnType<typeof setTimeout>;
