@@ -81,6 +81,10 @@ export class MedilinkService {
       email: input.email ?? '',
       sexo: input.sexo,
       fecha_nacimiento: input.fecha_nacimiento,
+      direccion: input.direccion ?? '',
+      comuna: input.comuna ?? '',
+      ciudad: input.ciudad ?? '',
+      observaciones: input.observaciones ?? '',
     });
   }
 

@@ -111,6 +111,10 @@ export type CreatePacienteInput = {
   email?: string;
   sexo?: string;
   fecha_nacimiento?: string;
+  direccion?: string;
+  comuna?: string;
+  ciudad?: string;
+  observaciones?: string;
 };
 
 export type GetAgendaQuery = {
