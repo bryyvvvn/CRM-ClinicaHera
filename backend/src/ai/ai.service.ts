@@ -20,6 +20,8 @@ import {
 const HISTORY_LIMIT = 16;
 const MAX_TOOL_ROUNDS = 6;
 const TZ = 'America/Santiago';
+export const AI_FALLBACK_REPLY =
+  'No alcancé a completar eso en el sistema. ¿Me confirmas de nuevo para intentarlo?';
 
 /**
  * v2 (oct 2026):
@@ -58,7 +60,7 @@ export class AiService {
   }
 
   async replyToConversation(conversation: ConversationDto): Promise<string> {
-    const history = await this.chatService.findMessages(conversation.id);
+    const history = await this.chatService.findMessagesForAi(conversation.id);
     const recent = collapseUserRuns(
       history
         .filter((message) => message.role === 'user' || message.role === 'assistant')
@@ -130,7 +132,7 @@ export class AiService {
         }
         if (nudged) {
           this.logger.warn(`AI afirmó "${unverified}" sin tool OK tras el aviso; respuesta bloqueada`);
-          return 'No alcancé a completar eso en el sistema. ¿Me confirmas de nuevo para intentarlo?';
+          return AI_FALLBACK_REPLY;
         }
         this.logger.warn(`AI afirmó "${unverified}" sin tool OK; se le pide llamarla`);
         nudged = true;

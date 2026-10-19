@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { MessageRole } from '@prisma/client';
-import { AiService } from '../ai/ai.service.js';
+import { ChatStatus, MessageRole } from '@prisma/client';
+import { AI_FALLBACK_REPLY, AiService } from '../ai/ai.service.js';
 import { ChatGateway } from '../chat/chat.gateway.js';
 import { ChatService } from '../chat/chat.service.js';
 import type { ConversationDto } from '../chat/chat.types.js';
@@ -125,6 +125,10 @@ export class WhatsappService {
       this.chatGateway.notifyTyping(conversation.id, false);
       return;
     }
+    if ((await this.chatService.getSessionStatus(conversation.id)) === ChatStatus.resolved) {
+      this.chatGateway.notifyTyping(conversation.id, false);
+      return;
+    }
 
     await this.whatsappApi.showTyping(messageId);
     try {
@@ -135,6 +139,10 @@ export class WhatsappService {
       if (this.replyGeneration.get(conversation.id) !== generation) {
         return;
       }
+      if ((await this.chatService.getSessionStatus(conversation.id)) === ChatStatus.resolved) {
+        this.chatGateway.notifyTyping(conversation.id, false);
+        return;
+      }
       const wamid = await this.whatsappApi.sendText(conversation.phone, reply);
       const saved = await this.chatService.createMessage(
         conversation.id,
@@ -142,6 +150,12 @@ export class WhatsappService {
         reply,
         wamid,
       );
+      if (
+        reply === AI_FALLBACK_REPLY &&
+        (await this.chatService.getSessionStatus(conversation.id)) === ChatStatus.open
+      ) {
+        await this.chatService.markAttention(conversation.id, 'El bot no pudo completar una acción');
+      }
       this.chatGateway.notifyIncoming(
         (await this.chatService.getConversation(conversation.id)) ??
           conversation,
@@ -156,6 +170,9 @@ export class WhatsappService {
         MessageRole.system,
         `La IA no pudo responder. ${detail}`,
       );
+      if ((await this.chatService.getSessionStatus(conversation.id)) === ChatStatus.open) {
+        await this.chatService.markAttention(conversation.id, 'La IA no pudo responder');
+      }
       this.chatGateway.notifyIncoming(
         (await this.chatService.getConversation(conversation.id)) ??
           conversation,

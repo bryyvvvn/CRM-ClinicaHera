@@ -194,6 +194,21 @@ export class ChatService {
     });
   }
 
+  async findMessagesForAi(chatSessionId: string) {
+    const session = await this.prisma.chatSession.findUnique({
+      where: { id: chatSessionId },
+      select: { contextStartAt: true },
+    });
+    const contextStartAt = session?.contextStartAt;
+    return this.prisma.message.findMany({
+      where: {
+        chatSessionId,
+        ...(contextStartAt ? { createdAt: { gt: contextStartAt } } : {}),
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
   async listMessages(chatSessionId: string): Promise<ChatMessageDto[]> {
     const messages = await this.findMessages(chatSessionId);
     return messages.map((message) => this.toMessageDto(message));
