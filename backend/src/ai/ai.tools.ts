@@ -77,7 +77,7 @@ export const AI_TOOLS: AiToolDefinition[] = [
     function: {
       name: 'crearCita',
       description:
-        'Agenda una hora nueva (siempre como consulta). Solo después de que el paciente confirmó el resumen. Requiere profesional y, si hay más de una sucursal, id_sucursal. En comentario va "Motivo: ..." con el motivo de consulta. El backend rechaza una segunda hora el mismo día con el mismo profesional y más de 2 horas el mismo día.',
+        'Agenda una hora nueva (siempre como consulta). Solo después de que la ficha ya existe y el paciente confirmó el resumen. Si es para otra persona, exige para_otra_persona, id_paciente y rut devueltos por crearPaciente. Requiere profesional y, si hay más de una sucursal, id_sucursal. En comentario va "Motivo: ..." con el motivo de consulta. El backend rechaza una segunda hora el mismo día con el mismo profesional y más de 2 horas el mismo día.',
       parameters: {
         type: 'object',
         properties: {

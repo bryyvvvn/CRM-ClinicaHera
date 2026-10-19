@@ -527,7 +527,7 @@ export class AiService {
     const paciente = await this.findPaciente(args, context);
     if (!paciente) {
       throw new HttpException(
-        'El paciente no tiene ficha con este celular. Sigue "Crear la ficha" antes de continuar.',
+        'El paciente no tiene ficha. Sigue "Datos de la ficha" y pide solo el dato que falte. No ofrezcas otro horario ni mandes a recepción.',
         404,
       );
     }
