@@ -1,7 +1,19 @@
 import { Injectable } from '@nestjs/common';
-import { MessageRole, type Message } from '@prisma/client';
+import {
+  ChatStatus,
+  MessageRole,
+  type ChatSession,
+  type Message,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
-import type { ChatMessageDto, ConversationDto } from './chat.types.js';
+import type {
+  ChatMessageDto,
+  ConversationDto,
+  ConversationPage,
+  SessionActionResult,
+} from './chat.types.js';
+
+const SESSION_NOT_FOUND = 'Sesión no encontrada';
 
 @Injectable()
 export class ChatService {
@@ -9,6 +21,7 @@ export class ChatService {
 
   async listConversations(): Promise<ConversationDto[]> {
     const sessions = await this.prisma.chatSession.findMany({
+      where: { status: ChatStatus.open },
       include: {
         patient: true,
         messages: { orderBy: { createdAt: 'desc' }, take: 1 },
@@ -16,18 +29,182 @@ export class ChatService {
       orderBy: { updatedAt: 'desc' },
     });
 
-    return sessions.map((session) => ({
-      id: session.id,
-      patientName: session.patient.name,
-      phone: session.patient.phone,
-      lastMessage: session.messages[0]?.content ?? '',
-      isAiActive: session.isAiActive,
-    }));
+    return sessions.map((session) =>
+      this.toConversation(
+        session,
+        session.patient,
+        session.messages[0]?.content ?? '',
+      ),
+    );
+  }
+
+  async listResolvedConversations(input: {
+    cursor?: string;
+    limit: number;
+  }): Promise<ConversationPage> {
+    const sessions = await this.prisma.chatSession.findMany({
+      where: { status: ChatStatus.resolved },
+      include: {
+        patient: true,
+        messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+      },
+      orderBy: [{ resolvedAt: 'desc' }, { id: 'desc' }],
+      take: input.limit + 1,
+      ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
+    });
+
+    const hasMore = sessions.length > input.limit;
+    const page = hasMore ? sessions.slice(0, input.limit) : sessions;
+    return {
+      items: page.map((session) =>
+        this.toConversation(
+          session,
+          session.patient,
+          session.messages[0]?.content ?? '',
+        ),
+      ),
+      nextCursor: hasMore ? (page[page.length - 1]?.id ?? null) : null,
+    };
+  }
+
+  async getConversation(sessionId: string): Promise<ConversationDto | null> {
+    const session = await this.prisma.chatSession.findUnique({
+      where: { id: sessionId },
+      include: {
+        patient: true,
+        messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+      },
+    });
+    if (!session) {
+      return null;
+    }
+    return this.toConversation(
+      session,
+      session.patient,
+      session.messages[0]?.content ?? '',
+    );
+  }
+
+  async resolveSession(
+    sessionId: string,
+  ): Promise<SessionActionResult<ChatSession>> {
+    const session = await this.prisma.chatSession.findUnique({
+      where: { id: sessionId },
+    });
+    if (!session) {
+      return { ok: false, error: SESSION_NOT_FOUND };
+    }
+    if (session.status === ChatStatus.resolved) {
+      return { ok: true, session };
+    }
+    const updated = await this.prisma.chatSession.update({
+      where: { id: sessionId },
+      data: {
+        status: ChatStatus.resolved,
+        resolvedAt: new Date(),
+        needsAttention: false,
+        attentionReason: null,
+        attentionAt: null,
+      },
+    });
+    return { ok: true, session: updated };
+  }
+
+  async reopenSession(
+    sessionId: string,
+    options: { porPaciente: boolean },
+  ): Promise<SessionActionResult<ChatSession>> {
+    const session = await this.prisma.chatSession.findUnique({
+      where: { id: sessionId },
+    });
+    if (!session) {
+      return { ok: false, error: SESSION_NOT_FOUND };
+    }
+    if (session.status === ChatStatus.open) {
+      return { ok: true, session };
+    }
+    const updated = await this.prisma.chatSession.update({
+      where: { id: sessionId },
+      data: {
+        status: ChatStatus.open,
+        ...(options.porPaciente
+          ? { isAiActive: true, contextStartAt: session.resolvedAt }
+          : {}),
+      },
+    });
+    return { ok: true, session: updated };
+  }
+
+  async markAttention(
+    sessionId: string,
+    reason: string,
+  ): Promise<SessionActionResult<ChatSession>> {
+    const session = await this.prisma.chatSession.findUnique({
+      where: { id: sessionId },
+    });
+    if (!session) {
+      return { ok: false, error: SESSION_NOT_FOUND };
+    }
+    const updated = await this.prisma.chatSession.update({
+      where: { id: sessionId },
+      data: {
+        needsAttention: true,
+        attentionReason: reason,
+        attentionAt: new Date(),
+      },
+    });
+    return { ok: true, session: updated };
+  }
+
+  async clearAttention(
+    sessionId: string,
+  ): Promise<SessionActionResult<ChatSession>> {
+    const session = await this.prisma.chatSession.findUnique({
+      where: { id: sessionId },
+    });
+    if (!session) {
+      return { ok: false, error: SESSION_NOT_FOUND };
+    }
+    if (
+      !session.needsAttention &&
+      !session.attentionReason &&
+      !session.attentionAt
+    ) {
+      return { ok: true, session };
+    }
+    const updated = await this.prisma.chatSession.update({
+      where: { id: sessionId },
+      data: { needsAttention: false, attentionReason: null, attentionAt: null },
+    });
+    return { ok: true, session: updated };
+  }
+
+  async getSessionStatus(sessionId: string): Promise<ChatStatus | null> {
+    const session = await this.prisma.chatSession.findUnique({
+      where: { id: sessionId },
+      select: { status: true },
+    });
+    return session?.status ?? null;
   }
 
   findMessages(chatSessionId: string) {
     return this.prisma.message.findMany({
       where: { chatSessionId },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
+  async findMessagesForAi(chatSessionId: string) {
+    const session = await this.prisma.chatSession.findUnique({
+      where: { id: chatSessionId },
+      select: { contextStartAt: true },
+    });
+    const contextStartAt = session?.contextStartAt;
+    return this.prisma.message.findMany({
+      where: {
+        chatSessionId,
+        ...(contextStartAt ? { createdAt: { gt: contextStartAt } } : {}),
+      },
       orderBy: { createdAt: 'asc' },
     });
   }
@@ -134,6 +311,13 @@ export class ChatService {
       session = await this.prisma.chatSession.create({
         data: { patientId: patient.id },
       });
+    } else if (session.status === ChatStatus.resolved) {
+      const reopened = await this.reopenSession(session.id, {
+        porPaciente: true,
+      });
+      if (reopened.ok) {
+        session = reopened.session;
+      }
     }
 
     const message = await this.createMessage(
@@ -151,7 +335,7 @@ export class ChatService {
   }
 
   private toConversation(
-    session: { id: string; isAiActive: boolean },
+    session: ChatSession,
     patient: { name: string; phone: string },
     lastMessage: string,
   ): ConversationDto {
@@ -161,6 +345,11 @@ export class ChatService {
       phone: patient.phone,
       lastMessage,
       isAiActive: session.isAiActive,
+      status: session.status,
+      resolvedAt: session.resolvedAt?.toISOString() ?? null,
+      needsAttention: session.needsAttention,
+      attentionReason: session.attentionReason,
+      attentionAt: session.attentionAt?.toISOString() ?? null,
     };
   }
 

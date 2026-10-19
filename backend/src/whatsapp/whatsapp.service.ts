@@ -1,8 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { MessageRole } from '@prisma/client';
-import { AiService } from '../ai/ai.service.js';
+import { ChatStatus, MessageRole } from '@prisma/client';
+import { AI_FALLBACK_REPLY, AiService } from '../ai/ai.service.js';
 import { ChatGateway } from '../chat/chat.gateway.js';
 import { ChatService } from '../chat/chat.service.js';
+import type { ConversationDto } from '../chat/chat.types.js';
 import { WhatsappApiClient } from './whatsapp-api.client.js';
 import type { WhatsappWebhookPayload } from './whatsapp.types.js';
 
@@ -10,12 +11,7 @@ const REPLY_QUIET_MS = 6_000;
 
 type PendingReply = {
   timer: ReturnType<typeof setTimeout>;
-  conversation: {
-    id: string;
-    phone: string;
-    patientName: string;
-    isAiActive: boolean;
-  };
+  conversation: ConversationDto;
   messageId: string;
   generation: number;
 };
@@ -118,12 +114,7 @@ export class WhatsappService {
   }
 
   private async replyWithAi(
-    conversation: {
-      id: string;
-      phone: string;
-      patientName: string;
-      isAiActive: boolean;
-    },
+    conversation: ConversationDto,
     messageId: string,
     generation: number,
   ): Promise<void> {
@@ -131,6 +122,10 @@ export class WhatsappService {
       return;
     }
     if (!(await this.chatService.isAiActive(conversation.id))) {
+      this.chatGateway.notifyTyping(conversation.id, false);
+      return;
+    }
+    if ((await this.chatService.getSessionStatus(conversation.id)) === ChatStatus.resolved) {
       this.chatGateway.notifyTyping(conversation.id, false);
       return;
     }
@@ -144,6 +139,10 @@ export class WhatsappService {
       if (this.replyGeneration.get(conversation.id) !== generation) {
         return;
       }
+      if ((await this.chatService.getSessionStatus(conversation.id)) === ChatStatus.resolved) {
+        this.chatGateway.notifyTyping(conversation.id, false);
+        return;
+      }
       const wamid = await this.whatsappApi.sendText(conversation.phone, reply);
       const saved = await this.chatService.createMessage(
         conversation.id,
@@ -151,8 +150,15 @@ export class WhatsappService {
         reply,
         wamid,
       );
+      if (
+        reply === AI_FALLBACK_REPLY &&
+        (await this.chatService.getSessionStatus(conversation.id)) === ChatStatus.open
+      ) {
+        await this.chatService.markAttention(conversation.id, 'El bot no pudo completar una acción');
+      }
       this.chatGateway.notifyIncoming(
-        { ...conversation, lastMessage: reply },
+        (await this.chatService.getConversation(conversation.id)) ??
+          conversation,
         this.chatService.toChatMessage(saved),
       );
       this.chatGateway.notifyTyping(conversation.id, false);
@@ -164,8 +170,12 @@ export class WhatsappService {
         MessageRole.system,
         `La IA no pudo responder. ${detail}`,
       );
+      if ((await this.chatService.getSessionStatus(conversation.id)) === ChatStatus.open) {
+        await this.chatService.markAttention(conversation.id, 'La IA no pudo responder');
+      }
       this.chatGateway.notifyIncoming(
-        { ...conversation, lastMessage: failed.content },
+        (await this.chatService.getConversation(conversation.id)) ??
+          conversation,
         this.chatService.toChatMessage(failed),
       );
       if (this.replyGeneration.get(conversation.id) === generation) {
