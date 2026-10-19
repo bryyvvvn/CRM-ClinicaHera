@@ -92,6 +92,22 @@ export const AI_TOOLS: AiToolDefinition[] = [
             type: 'boolean',
             description: 'true solo cuando reemplaza una cita vigente por cambio de sucursal',
           },
+          para_otra_persona: {
+            type: 'boolean',
+            description: 'true solo si la hora es para alguien distinto de quien escribe por WhatsApp',
+          },
+          id_paciente: {
+            type: 'number',
+            description: 'Solo junto con para_otra_persona. El id que devolvió crearPaciente.',
+          },
+          rut: {
+            type: 'string',
+            description: 'Solo junto con para_otra_persona. El mismo RUT o pasaporte usado en crearPaciente.',
+          },
+          celular: {
+            type: 'string',
+            description: 'Solo junto con para_otra_persona. El celular de ella, si la ficha no tenía RUT.',
+          },
         },
         required: ['fecha', 'hora_inicio'],
       },
@@ -144,7 +160,7 @@ export const AI_TOOLS: AiToolDefinition[] = [
     function: {
       name: 'crearPaciente',
       description:
-        'Crea la ficha del paciente de esta conversación. El celular de WhatsApp lo pone el backend. Úsala una sola vez, cuando ya tengas nombre, apellidos, RUT o pasaporte, correo, dirección, ocupación y si es extranjero. Si ya existe una ficha con este celular, la devuelve sin crear otra.',
+        'Crea la ficha de quien se va a atender. Sin para_otra_persona, el celular es el WhatsApp de esta conversación. Con para_otra_persona true, la ficha es de la otra persona y celular es el número de ella, no el de quien escribe. Si ese RUT ya existe, devuelve solo id_paciente, sin otros datos. Úsala una sola vez, con nombre, apellidos, RUT o pasaporte, correo, dirección, ocupación y si es extranjero.',
       parameters: {
         type: 'object',
         properties: {
@@ -152,11 +168,19 @@ export const AI_TOOLS: AiToolDefinition[] = [
           apellidos: { type: 'string' },
           rut: { type: 'string', description: 'RUT chileno, o pasaporte si es extranjero.' },
           email: { type: 'string' },
-          telefono: { type: 'string', description: 'Otro número de contacto, solo si es distinto al WhatsApp.' },
+          celular: {
+            type: 'string',
+            description: 'Celular de la otra persona. Obligatorio si para_otra_persona es true.',
+          },
+          telefono: { type: 'string', description: 'Otro número de contacto, solo si es distinto al celular de la ficha.' },
           direccion: { type: 'string', description: 'Dirección tal como la dijo el paciente.' },
           comuna: { type: 'string', description: 'La Serena, Coquimbo u otra comuna que haya nombrado.' },
           ocupacion: { type: 'string', description: 'Profesión u ocupación. Obligatoria.' },
           extranjero: { type: 'boolean', description: 'true si es extranjero, false si es chileno.' },
+          para_otra_persona: {
+            type: 'boolean',
+            description: 'true si la ficha no es de quien escribe por WhatsApp.',
+          },
         },
         required: ['nombre', 'apellidos', 'rut', 'email', 'direccion', 'ocupacion', 'extranjero'],
       },

@@ -211,7 +211,9 @@ export class AiService {
         if (!fecha || !hora) {
           throw new HttpException('crearCita requiere fecha y hora_inicio', 400);
         }
-        const paciente = await this.requirePaciente(args, context);
+        const paciente = args.para_otra_persona === true
+          ? await this.pacienteDeTercero(args)
+          : await this.requirePaciente(args, context);
         const idProfesional = await this.resolveProfesionalArg(args);
         if (!idProfesional) {
           throw new HttpException(
@@ -280,8 +282,18 @@ export class AiService {
       throw new HttpException('crearPaciente requiere nombre y apellidos', 400);
     }
 
-    const celular = preferConversationPhone(asString(args.celular), context.celular);
-    if (celular) {
+    const paraOtra = args.para_otra_persona === true;
+    const celularAjeno = asString(args.celular);
+    if (paraOtra && !celularAjeno) {
+      throw new HttpException(
+        'Falta el celular de la otra persona. Pídelo. No uses el WhatsApp de quien escribe.',
+        400,
+      );
+    }
+    const celular = paraOtra
+      ? celularAjeno
+      : preferConversationPhone(celularAjeno, context.celular);
+    if (!paraOtra && celular) {
       const existentes = await this.medilinkService.findPacientes({ celular });
       if (existentes[0]) {
         return { ya_existia: true, id_paciente: existentes[0].id };
@@ -301,9 +313,34 @@ export class AiService {
     if (rutChileno) {
       const porRut = await this.medilinkService.findPacientes({ rut: rutChileno });
       if (porRut[0]) {
+        if (paraOtra) {
+          return this.fichaTerceroExistente(porRut[0].id, rutChileno, asString(args.direccion), asString(args.comuna));
+        }
         throw new HttpException(
           'Ya existe una ficha con ese RUT asociada a otro número. No la modifiques ni des sus datos: entrega el contacto de recepción.',
           409,
+        );
+      }
+    }
+    if (paraOtra && celular && (rutChileno || rutRaw)) {
+      const porCelular = await this.medilinkService.findPacientes({ celular });
+      const ficha = porCelular[0];
+      if (ficha) {
+        const rutFicha = ficha.rut ? normalizeRut(ficha.rut) : undefined;
+        const rutDistinto =
+          (rutChileno && rutFicha && rutFicha !== rutChileno) ||
+          (!rutChileno && !!ficha.rut?.trim() && fold(ficha.rut) !== fold(rutRaw ?? ''));
+        if (rutDistinto) {
+          throw new HttpException(
+            'Ese celular ya tiene una ficha con otro RUT. No la uses: entrega el contacto de recepción.',
+            409,
+          );
+        }
+        return this.fichaTerceroExistente(
+          ficha.id,
+          rutChileno ?? rutRaw ?? '',
+          asString(args.direccion),
+          asString(args.comuna),
         );
       }
     }
@@ -349,8 +386,56 @@ export class AiService {
     return {
       creado: true,
       id_paciente: creado.id,
+      ...(paraOtra ? { para_otra_persona: true, rut: rut ?? rutRaw } : {}),
       comuna: lugar.comuna,
       sucursal_sugerida: lugar.sucursal,
+    };
+  }
+
+  /** La hora de un tercero solo se engancha al id que calza con el RUT recién entregado. */
+  private async pacienteDeTercero(args: Record<string, unknown>): Promise<MedilinkPaciente> {
+    const idPaciente = asNumber(args.id_paciente);
+    const rutRaw = asString(args.rut);
+    if (!idPaciente || !rutRaw) {
+      throw new HttpException(
+        'Para agendar a otra persona hacen falta id_paciente y rut, los que devolvió crearPaciente. No inventes el id.',
+        400,
+      );
+    }
+    const paciente = await this.medilinkService.getPaciente(idPaciente);
+    const rutChileno = normalizeRut(rutRaw);
+    const rutFicha = paciente.rut ? normalizeRut(paciente.rut) : undefined;
+    const calzaRut = rutChileno
+      ? rutFicha === rutChileno
+      : fold(paciente.rut ?? '') === fold(rutRaw);
+    const celular = asString(args.celular);
+    const calzaCelular =
+      !paciente.rut?.trim() &&
+      !!celular &&
+      !!paciente.celular &&
+      samePhone(celular, paciente.celular);
+    if (!calzaRut && !calzaCelular) {
+      throw new HttpException(
+        'Ese id no corresponde al RUT indicado. Usa el id_paciente que devolvió crearPaciente para ese RUT.',
+        400,
+      );
+    }
+    return paciente;
+  }
+
+  private fichaTerceroExistente(
+    idPaciente: number,
+    rut: string,
+    direccion?: string,
+    comuna?: string,
+  ) {
+    const lugar = direccion ? inferLugar(direccion, comuna) : undefined;
+    return {
+      ya_existia: true,
+      para_otra_persona: true,
+      id_paciente: idPaciente,
+      rut,
+      ...(lugar?.sucursal ? { comuna: lugar.comuna, sucursal_sugerida: lugar.sucursal } : {}),
     };
   }
 

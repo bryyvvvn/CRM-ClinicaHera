@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import type { ChatMessage, Conversation } from '../types/chat.ts';
 
-const WS_URL = import.meta.env.VITE_WS_URL ?? 'http://localhost:3000';
+const WS_URL = import.meta.env.VITE_WS_URL || window.location.origin;
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000/api';
 
 function readMessages(payload: unknown): ChatMessage[] {

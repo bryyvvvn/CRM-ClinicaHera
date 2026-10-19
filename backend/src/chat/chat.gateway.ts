@@ -26,7 +26,10 @@ type SocketServer = {
 
 @WebSocketGateway({
   cors: {
-    origin: process.env.FRONTEND_URL ?? 'http://localhost:5173',
+    origin: process.env.FRONTEND_URL?.split(',') ?? [
+      'http://localhost:5173',
+      'http://localhost:5174',
+    ],
   },
 })
 export class ChatGateway {
