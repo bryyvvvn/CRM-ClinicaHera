@@ -13,6 +13,11 @@ enum MessageRole {
   system
 }
 
+enum ChatStatus {
+  open
+  resolved
+}
+
 model Patient {
   id           String        @id @default(cuid())
   phone        String        @unique
@@ -23,13 +28,21 @@ model Patient {
 }
 
 model ChatSession {
-  id         String    @id @default(cuid())
-  patientId  String
-  patient    Patient   @relation(fields: [patientId], references: [id], onDelete: Cascade)
-  isAiActive Boolean   @default(true)
-  messages   Message[]
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  id              String     @id @default(cuid())
+  patientId       String
+  patient         Patient    @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  isAiActive      Boolean    @default(true)
+  status          ChatStatus @default(open)
+  resolvedAt      DateTime?
+  contextStartAt  DateTime?
+  needsAttention  Boolean    @default(false)
+  attentionReason String?
+  attentionAt     DateTime?
+  messages        Message[]
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([status, updatedAt])
 }
 
 model Message {

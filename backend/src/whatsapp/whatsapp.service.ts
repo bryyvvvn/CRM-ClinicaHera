@@ -3,6 +3,7 @@ import { MessageRole } from '@prisma/client';
 import { AiService } from '../ai/ai.service.js';
 import { ChatGateway } from '../chat/chat.gateway.js';
 import { ChatService } from '../chat/chat.service.js';
+import type { ConversationDto } from '../chat/chat.types.js';
 import { WhatsappApiClient } from './whatsapp-api.client.js';
 import type { WhatsappWebhookPayload } from './whatsapp.types.js';
 
@@ -10,12 +11,7 @@ const REPLY_QUIET_MS = 6_000;
 
 type PendingReply = {
   timer: ReturnType<typeof setTimeout>;
-  conversation: {
-    id: string;
-    phone: string;
-    patientName: string;
-    isAiActive: boolean;
-  };
+  conversation: ConversationDto;
   messageId: string;
   generation: number;
 };
@@ -118,12 +114,7 @@ export class WhatsappService {
   }
 
   private async replyWithAi(
-    conversation: {
-      id: string;
-      phone: string;
-      patientName: string;
-      isAiActive: boolean;
-    },
+    conversation: ConversationDto,
     messageId: string,
     generation: number,
   ): Promise<void> {
@@ -152,7 +143,8 @@ export class WhatsappService {
         wamid,
       );
       this.chatGateway.notifyIncoming(
-        { ...conversation, lastMessage: reply },
+        (await this.chatService.getConversation(conversation.id)) ??
+          conversation,
         this.chatService.toChatMessage(saved),
       );
       this.chatGateway.notifyTyping(conversation.id, false);
@@ -165,7 +157,8 @@ export class WhatsappService {
         `La IA no pudo responder. ${detail}`,
       );
       this.chatGateway.notifyIncoming(
-        { ...conversation, lastMessage: failed.content },
+        (await this.chatService.getConversation(conversation.id)) ??
+          conversation,
         this.chatService.toChatMessage(failed),
       );
       if (this.replyGeneration.get(conversation.id) === generation) {
