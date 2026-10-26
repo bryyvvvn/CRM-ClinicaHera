@@ -12,7 +12,9 @@ async function bootstrap() {
   app.useGlobalInterceptors(new HttpLoggingInterceptor());
   app.setGlobalPrefix('api');
   app.enableCors({
-    origin: process.env.FRONTEND_URL ?? 'http://localhost:5173',
+    origin: process.env.FRONTEND_URL?.split(',') ?? [
+      'http://localhost:5174',
+    ],
   });
 
   const port = Number(process.env.PORT ?? 3000);

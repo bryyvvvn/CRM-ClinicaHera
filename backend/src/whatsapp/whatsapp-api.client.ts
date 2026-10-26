@@ -49,4 +49,39 @@ export class WhatsappApiClient {
     this.logger.log(`WhatsApp outbound to=${to} wamid=${payload.messages?.[0]?.id ?? 'n/a'}`);
     return payload.messages?.[0]?.id;
   }
+
+  /** Muestra "escribiendo…" en el WhatsApp del paciente. Dura unos 25 segundos o hasta el próximo mensaje. */
+  async showTyping(incomingMessageId: string): Promise<void> {
+    const token = this.configService.get<string>('WHATSAPP_TOKEN');
+    const phoneNumberId = this.configService.get<string>('WHATSAPP_PHONE_NUMBER_ID');
+    if (!token || !phoneNumberId || !incomingMessageId) {
+      return;
+    }
+
+    const response = await fetch(
+      `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          status: 'read',
+          message_id: incomingMessageId,
+          typing_indicator: { type: 'text' },
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as {
+        error?: { message?: string };
+      } | null;
+      this.logger.warn(
+        `WhatsApp typing no se mostró: ${payload?.error?.message ?? response.statusText}`,
+      );
+    }
+  }
 }

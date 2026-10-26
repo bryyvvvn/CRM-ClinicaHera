@@ -1,10 +1,24 @@
-import { ArrowLeft, Bot, MessageCircle, Pause, Play, Send, UserRound } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Bot,
+  CheckCircle2,
+  MessageCircle,
+  Pause,
+  Play,
+  RotateCcw,
+  Send,
+  UserRound,
+} from 'lucide-react';
 import { Fragment, useEffect, useRef, useState, type FormEvent } from 'react';
 import { formatChileanPhone } from '../../utils/formatPhone.ts';
-import type { ChatMessage, Conversation } from '../../types/chat.ts';
+import { conversationStatus, type ChatMessage, type Conversation } from '../../types/chat.ts';
+import { formatDateTime, formatTime } from '../../utils/formatDate.ts';
 import { WhatsAppIcon } from '../icons/WhatsAppIcon.tsx';
 import { MessageBubble } from './MessageBubble.tsx';
 import { DateSeparator, getMessageDateKey } from './DataSeparator.tsx';
+
+export type PendingAction = 'resolve' | 'reopen' | 'clearAttention';
 
 type ChatWindowProps = {
   conversation?: Conversation;
@@ -12,8 +26,18 @@ type ChatWindowProps = {
   connected: boolean;
   onBack: () => void;
   onToggleAi: (isAiActive: boolean) => void;
+  onResolve: () => void;
+  onReopen: () => void;
+  onClearAttention: () => void;
+  pendingAction: PendingAction | null;
+  actionError: string | null;
   onSend: (content: string) => void;
+  onTyping: () => void;
+  assistantTyping: boolean;
 };
+
+const focusRing =
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--hera-blue)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--hera-surface)]';
 
 function getInitials(name: string) {
   return (
@@ -33,14 +57,35 @@ export function ChatWindow({
   connected,
   onBack,
   onToggleAi,
+  onResolve,
+  onReopen,
+  onClearAttention,
+  pendingAction,
+  actionError,
   onSend,
+  onTyping,
+  assistantTyping,
 }: ChatWindowProps) {
   const [draft, setDraft] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lastTypingAt = useRef(0);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ block: 'end' });
-  }, [messages]);
+  }, [messages, assistantTyping]);
+
+  const handleDraftChange = (value: string) => {
+    setDraft(value);
+    if (!value.trim()) {
+      return;
+    }
+    const now = Date.now();
+    if (now - lastTypingAt.current < 4000) {
+      return;
+    }
+    lastTypingAt.current = now;
+    onTyping();
+  };
 
   if (!conversation) {
     return (
@@ -57,6 +102,9 @@ export function ChatWindow({
       </main>
     );
   }
+
+  const resolved = conversationStatus(conversation) === 'resolved';
+  const needsAttention = !resolved && Boolean(conversation.needsAttention);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -116,22 +164,99 @@ export function ChatWindow({
             {conversation.isAiActive ? <Bot size={15} /> : <UserRound size={15} />}
             {conversation.isAiActive ? 'IA activa' : 'Modo humano'}
           </span>
-          <button
-            type="button"
-            onClick={() => onToggleAi(!conversation.isAiActive)}
-            className={`flex h-9 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition sm:h-10 sm:px-4 ${
-              conversation.isAiActive
-                ? 'border border-[var(--hera-border)] bg-[var(--hera-surface)] text-[var(--hera-text)] hover:border-[var(--hera-coral)] hover:text-[var(--hera-coral-dark)]'
-                : 'bg-[var(--hera-blue)] text-[var(--hera-on-accent)] hover:bg-[var(--hera-blue-dark)]'
-            }`}
-          >
-            {conversation.isAiActive ? <Pause size={15} /> : <Play size={15} />}
-            <span className="hidden min-[430px]:inline">
-              {conversation.isAiActive ? 'Pausar IA' : 'Reanudar IA'}
-            </span>
-          </button>
+          <div className="flex items-center gap-2">
+            {!resolved ? (
+              <button
+                type="button"
+                onClick={onResolve}
+                disabled={pendingAction === 'resolve'}
+                aria-label="Marcar conversación como resuelta"
+                className={`flex h-9 items-center gap-2 rounded-xl border border-[var(--hera-border)] bg-[var(--hera-surface)] px-3 text-xs font-semibold text-[var(--hera-text)] transition hover:border-[var(--hera-blue)] hover:text-[var(--hera-blue-dark)] disabled:cursor-wait disabled:opacity-60 sm:h-10 sm:px-4 ${focusRing}`}
+              >
+                <CheckCircle2 size={15} aria-hidden="true" />
+                <span className="hidden min-[430px]:inline">Marcar resuelto</span>
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => onToggleAi(!conversation.isAiActive)}
+              aria-label={conversation.isAiActive ? 'Pausar IA' : 'Reanudar IA'}
+              className={`flex h-9 items-center gap-2 rounded-xl px-3 text-xs font-semibold transition sm:h-10 sm:px-4 ${focusRing} ${
+                conversation.isAiActive
+                  ? 'border border-[var(--hera-border)] bg-[var(--hera-surface)] text-[var(--hera-text)] hover:border-[var(--hera-coral)] hover:text-[var(--hera-coral-dark)]'
+                  : 'bg-[var(--hera-blue)] text-[var(--hera-on-accent)] hover:bg-[var(--hera-blue-dark)]'
+              }`}
+            >
+              {conversation.isAiActive ? <Pause size={15} /> : <Play size={15} />}
+              <span className="hidden min-[430px]:inline">
+                {conversation.isAiActive ? 'Pausar IA' : 'Reanudar IA'}
+              </span>
+            </button>
+          </div>
         </div>
       </header>
+
+      {resolved ? (
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--hera-border)] bg-[var(--hera-surface-soft)] px-4 py-2 sm:px-5">
+          <p className="flex min-w-0 items-center gap-2 text-xs text-[var(--hera-muted)]">
+            <CheckCircle2 size={15} className="shrink-0 text-[var(--hera-blue)]" aria-hidden="true" />
+            <span className="min-w-0">
+              Conversación resuelta
+              {conversation.resolvedAt ? ` el ${formatDateTime(conversation.resolvedAt)}` : ''}
+            </span>
+          </p>
+          <button
+            type="button"
+            onClick={onReopen}
+            disabled={pendingAction === 'reopen'}
+            aria-label="Reabrir conversación"
+            className={`flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-[var(--hera-border)] bg-[var(--hera-surface)] px-3 text-xs font-semibold text-[var(--hera-text)] transition hover:border-[var(--hera-blue)] hover:text-[var(--hera-blue-dark)] disabled:cursor-wait disabled:opacity-60 ${focusRing}`}
+          >
+            <RotateCcw size={14} aria-hidden="true" />
+            Reabrir
+          </button>
+        </div>
+      ) : null}
+
+      {needsAttention ? (
+        <div
+          role="alert"
+          className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--hera-border)] bg-[var(--hera-alert-soft)] px-4 py-2 sm:px-5"
+        >
+          <p className="flex min-w-0 flex-1 items-center gap-2 text-xs text-[var(--hera-alert-strong)]">
+            <AlertTriangle size={15} className="shrink-0 text-[var(--hera-alert)]" aria-hidden="true" />
+            <span className="min-w-0">
+              <span className="font-semibold">Requiere atención</span>
+              {conversation.attentionReason ? `: ${conversation.attentionReason}` : ''}
+              {conversation.attentionAt ? (
+                <span className="opacity-80"> · {formatTime(conversation.attentionAt)}</span>
+              ) : null}
+            </span>
+          </p>
+          <button
+            type="button"
+            onClick={onClearAttention}
+            disabled={pendingAction === 'clearAttention'}
+            aria-label="Marcar alerta como atendida"
+            className={`flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[var(--hera-alert)] px-3 text-xs font-semibold text-[var(--hera-on-alert)] transition hover:opacity-90 disabled:cursor-wait disabled:opacity-60 ${focusRing}`}
+          >
+            <CheckCircle2 size={14} aria-hidden="true" />
+            Atendido
+          </button>
+        </div>
+      ) : null}
+
+      <p
+        role="status"
+        aria-live="polite"
+        className={
+          actionError
+            ? 'border-b border-[var(--hera-border)] bg-[var(--hera-surface)] px-4 py-1.5 text-xs text-[var(--hera-coral-dark)] sm:px-5'
+            : 'sr-only'
+        }
+      >
+        {actionError ?? ''}
+      </p>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2.5 overflow-x-hidden overflow-y-auto px-4 py-5 sm:gap-3 sm:px-6 sm:py-6 lg:px-8">
         {messages.length === 0 ? (
@@ -165,6 +290,13 @@ export function ChatWindow({
             );
           })
         )}
+        {assistantTyping ? (
+          <div className="flex justify-end">
+            <div className="rounded-2xl rounded-br-md bg-[var(--hera-chat-outgoing)] px-4 py-2.5 text-sm tracking-widest text-[var(--hera-muted)]">
+              .....
+            </div>
+          </div>
+        ) : null}
         <div ref={messagesEndRef} />
       </div>
 
@@ -178,8 +310,8 @@ export function ChatWindow({
         <input
           id="message-draft"
           value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          placeholder="Escribe un mensaje..."
+          onChange={(event) => handleDraftChange(event.target.value)}
+          placeholder={resolved ? 'Conversación resuelta: al enviar se reabre' : 'Escribe un mensaje...'}
           autoComplete="off"
           className="h-12 min-w-0 flex-1 rounded-2xl border border-[var(--hera-border)] bg-[var(--hera-chat-background)] px-4 text-sm text-[var(--hera-text)] outline-none transition placeholder:text-[var(--hera-placeholder)] focus:border-[var(--hera-blue)] focus:bg-[var(--hera-surface)] focus:ring-4 focus:ring-[var(--hera-blue-soft)]"
         />

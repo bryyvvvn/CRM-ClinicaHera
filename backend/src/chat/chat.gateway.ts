@@ -6,10 +6,14 @@ import {
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
-import { MessageRole } from '@prisma/client';
+import { ChatStatus, MessageRole, type ChatSession } from '@prisma/client';
 import { WhatsappApiClient } from '../whatsapp/whatsapp-api.client.js';
 import { ChatService } from './chat.service.js';
-import type { ChatMessageDto, ConversationDto } from './chat.types.js';
+import type {
+  ChatMessageDto,
+  ConversationDto,
+  SessionActionResult,
+} from './chat.types.js';
 
 type SocketClient = {
   id: string;
@@ -26,7 +30,10 @@ type SocketServer = {
 
 @WebSocketGateway({
   cors: {
-    origin: process.env.FRONTEND_URL ?? 'http://localhost:5173',
+    origin: process.env.FRONTEND_URL?.split(',') ?? [
+      'http://localhost:5173',
+      'http://localhost:5174',
+    ],
   },
 })
 export class ChatGateway {
@@ -43,6 +50,10 @@ export class ChatGateway {
   notifyIncoming(conversation: ConversationDto, message: ChatMessageDto): void {
     this.server.emit('conversationUpserted', conversation);
     this.server.to(conversation.id).emit('newMessage', message);
+  }
+
+  notifyTyping(sessionId: string, active: boolean): void {
+    this.server.emit('assistantTyping', { sessionId, active });
   }
 
   @SubscribeMessage('joinSession')
@@ -67,6 +78,13 @@ export class ChatGateway {
     payload: { sessionId: string; role: 'user' | 'assistant' | 'system'; content: string },
   ) {
     if (payload.role === 'assistant') {
+      const status = await this.chatService.getSessionStatus(payload.sessionId);
+      if (status === ChatStatus.resolved) {
+        await this.chatService.reopenSession(payload.sessionId, {
+          porPaciente: false,
+        });
+        await this.emitConversation(payload.sessionId);
+      }
       try {
         const phone = await this.chatService.getPatientPhone(payload.sessionId);
         if (!phone) {
@@ -106,6 +124,16 @@ export class ChatGateway {
     return dto;
   }
 
+  @SubscribeMessage('typing')
+  async typing(@MessageBody() payload: { sessionId: string }) {
+    const messageId = await this.chatService.latestInboundExternalId(payload.sessionId);
+    if (!messageId) {
+      return { ok: false };
+    }
+    await this.whatsappApi.showTyping(messageId);
+    return { ok: true };
+  }
+
   @SubscribeMessage('toggleAi')
   async toggleAi(
     @MessageBody() payload: { sessionId: string; isAiActive: boolean },
@@ -120,5 +148,51 @@ export class ChatGateway {
       isAiActive: session.isAiActive,
     });
     return session;
+  }
+
+  @SubscribeMessage('resolveSession')
+  async resolveSession(@MessageBody() payload: { sessionId: string }) {
+    return this.respondWithConversation(
+      await this.chatService.resolveSession(payload.sessionId),
+    );
+  }
+
+  @SubscribeMessage('reopenSession')
+  async reopenSession(@MessageBody() payload: { sessionId: string }) {
+    return this.respondWithConversation(
+      await this.chatService.reopenSession(payload.sessionId, {
+        porPaciente: false,
+      }),
+    );
+  }
+
+  @SubscribeMessage('clearAttention')
+  async clearAttention(@MessageBody() payload: { sessionId: string }) {
+    return this.respondWithConversation(
+      await this.chatService.clearAttention(payload.sessionId),
+    );
+  }
+
+  private async respondWithConversation(
+    result: SessionActionResult<ChatSession>,
+  ) {
+    if (!result.ok) {
+      return result;
+    }
+    const conversation = await this.emitConversation(result.session.id);
+    if (!conversation) {
+      return { ok: false as const, error: 'Sesión no encontrada' };
+    }
+    return conversation;
+  }
+
+  private async emitConversation(
+    sessionId: string,
+  ): Promise<ConversationDto | null> {
+    const conversation = await this.chatService.getConversation(sessionId);
+    if (conversation) {
+      this.server.emit('conversationUpserted', conversation);
+    }
+    return conversation;
   }
 }

@@ -2,9 +2,13 @@ import { HttpException, Injectable, Logger } from '@nestjs/common';
 import { ChatService } from '../chat/chat.service.js';
 import type { ConversationDto } from '../chat/chat.types.js';
 import { MedilinkService } from '../medilink/medilink.service.js';
-import type { MedilinkCita, MedilinkPaciente } from '../medilink/medilink.types.js';
+import type {
+  MedilinkCita,
+  MedilinkPaciente,
+  MedilinkProfesional,
+} from '../medilink/medilink.types.js';
 import { DeepseekClient, type DeepseekChatMessage } from './deepseek.client.js';
-import { buildClinicaHeraPrompt } from './ai.prompt.js';
+import { buildClinicaHeraPrompt, type Sucursal } from './ai.prompt.js';
 import {
   AI_TOOL_NAMES,
   AI_TOOLS,
@@ -15,7 +19,22 @@ import {
 
 const HISTORY_LIMIT = 16;
 const MAX_TOOL_ROUNDS = 6;
+const TZ = 'America/Santiago';
+export const AI_FALLBACK_REPLY =
+  'No alcancé a completar eso en el sistema. ¿Me confirmas de nuevo para intentarlo?';
 
+/**
+ * v2 (oct 2026):
+ * - Se eliminaron los flujos "forzados" por regex (agendar / cambiar / anular sin pasar por la IA).
+ *   Anulaban horas con frases como "¿se puede cancelar por sesión?" y agendaban con el primer
+ *   profesional habilitado. Ahora toda acción la decide la IA siguiendo el prompt.
+ * - En su reemplazo hay una red de seguridad: si la IA dice que algo "quedó agendado/cambiado/anulado/
+ *   confirmado" sin que la herramienta haya respondido OK en este turno, se le exige llamarla.
+ * - El paciente siempre se identifica por el celular de la conversación (no por ids que mande la IA),
+ *   y una cita solo se puede tocar si pertenece a ese paciente.
+ * - Profesional por nombre: si no calza o calza con varios, error explicativo (antes caía al primero).
+ * - Regla de citas por día, validación de RUT y deduplicación de fichas.
+ */
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
@@ -41,22 +60,12 @@ export class AiService {
   }
 
   async replyToConversation(conversation: ConversationDto): Promise<string> {
-    const history = await this.chatService.findMessages(conversation.id);
-    const recent = history
-      .filter((message) => message.role === 'user' || message.role === 'assistant')
-      .slice(-HISTORY_LIMIT);
-
-    const lastUser = [...recent].reverse().find((message) => message.role === 'user');
-    const lastAssistant = [...recent].reverse().find((message) => message.role === 'assistant');
-    if (lastUser && shouldForceCancel(lastUser.content, lastAssistant?.content)) {
-      return this.cancelFromConversation(conversation);
-    }
-    if (lastUser && shouldForceChange(lastUser.content, lastAssistant?.content)) {
-      return this.changeFromConversation(conversation, recent);
-    }
-    if (lastUser && shouldForceBook(lastUser.content, lastAssistant?.content)) {
-      return this.bookFromConversation(conversation, recent);
-    }
+    const history = await this.chatService.findMessagesForAi(conversation.id);
+    const recent = collapseUserRuns(
+      history
+        .filter((message) => message.role === 'user' || message.role === 'assistant')
+        .slice(-HISTORY_LIMIT),
+    );
 
     const messages: DeepseekChatMessage[] = [
       { role: 'system', content: await this.systemPrompt() },
@@ -66,6 +75,7 @@ export class AiService {
       })),
     ];
 
+    const lastUser = [...recent].reverse().find((message) => message.role === 'user');
     if (lastUser && isAvailabilityIntent(lastUser.content)) {
       messages.push({
         role: 'system',
@@ -79,157 +89,20 @@ export class AiService {
     return this.runWithTools(messages, { celular: conversation.phone });
   }
 
-  private async bookFromConversation(
-    conversation: ConversationDto,
-    recent: Array<{ role: string; content: string }>,
-  ): Promise<string> {
-    const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
-    const booking = extractBooking(
-      recent.map((message) => message.content),
-      todayIso,
-    );
-    if (!booking.fecha || !booking.hora) {
-      return '¿Me confirmas el día y la hora para agendar?';
-    }
-
-    this.logger.log(`AI forced crearCita session=${conversation.id} fecha=${booking.fecha} hora=${booking.hora}`);
-    try {
-      const result = (await this.executeTool(
-        {
-          name: 'crearCita',
-          arguments: {
-            fecha: booking.fecha,
-            hora_inicio: booking.hora,
-            celular: conversation.phone,
-            comentario: 'Consulta agendada por WhatsApp',
-          },
-        },
-        { celular: conversation.phone },
-      )) as MedilinkCita;
-      const when = [result.fecha ?? booking.fecha, (result.hora_inicio ?? booking.hora).slice(0, 5)]
-        .filter(Boolean)
-        .join(' a las ');
-      return `Listo, tu hora del ${when} quedó agendada.`;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : 'Error desconocido';
-      this.logger.warn(`AI forced crearCita failed: ${detail}`);
-      return 'No pude agendar esa hora en el sistema. ¿Quieres que te ofrezca otro horario?';
-    }
-  }
-
-  private async changeFromConversation(
-    conversation: ConversationDto,
-    recent: Array<{ role: string; content: string }>,
-  ): Promise<string> {
-    const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
-    const texts = recent.map((message) => message.content);
-    const lastUser = [...recent].reverse().find((message) => message.role === 'user')?.content ?? '';
-    const profesional = extractProfesional(lastUser) ?? [...texts].reverse().map(extractProfesional).find(Boolean);
-    const citas = (await this.executeTool(
-      { name: 'verCitas', arguments: {} },
-      { celular: conversation.phone },
-    )) as MedilinkCita[];
-    const current = pickUpcomingCita(citas);
-    const horaActual = current?.hora_inicio?.slice(0, 5);
-    // Si el paciente solo dijo "confirmo", la hora pedida está en la pregunta de
-    // confirmación. No se busca más atrás para no tomar una hora de un listado.
-    const lastAssistant =
-      [...recent].reverse().find((message) => message.role === 'assistant')?.content ?? '';
-    const hora =
-      extractHora(lastUser) ??
-      (isChangeConfirmPrompt(lastAssistant)
-        ? extractHoraObjetivo(lastAssistant, horaActual)
-        : undefined) ??
-      horaActual;
-    const fecha = extractFecha(lastUser, todayIso) ?? current?.fecha;
-
-    this.logger.log(
-      `AI forced cambio session=${conversation.id} fecha=${fecha ?? ''} hora=${hora ?? ''} cita=${current?.id ?? ''} profesional=${profesional ?? ''}`,
-    );
-
-    if (
-      current &&
-      fecha === current.fecha &&
-      hora === horaActual &&
-      isSameProfesional(profesional, current)
-    ) {
-      return `Tu hora ya está agendada para el ${fecha} a las ${horaActual}. ¿A qué hora la quieres mover?`;
-    }
-
-    try {
-      const result = (await this.executeTool(
-        {
-          name: 'cambiarCita',
-          arguments: {
-            id_cita: current?.id,
-            fecha,
-            hora_inicio: hora,
-            nombre_profesional: profesional,
-            celular: conversation.phone,
-          },
-        },
-        { celular: conversation.phone },
-      )) as MedilinkCita;
-      const when = [result.fecha ?? fecha, (result.hora_inicio ?? hora ?? '').slice(0, 5)]
-        .filter(Boolean)
-        .join(' a las ');
-      const who = result.nombre_profesional ?? result.nombre_dentista ?? profesional;
-      return who
-        ? `Listo, tu hora quedó cambiada al ${when} con ${who}.`
-        : `Listo, tu hora quedó cambiada al ${when}.`;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : 'Error desconocido';
-      this.logger.warn(`AI forced cambio failed: ${detail}`);
-      if (/tope con otra cita|ya cuenta con una cita|cupo/i.test(detail)) {
-        return hora
-          ? `Las ${hora} se acaban de ocupar. ¿Quieres que te ofrezca las otras horas libres de ese día?`
-          : 'Esa hora se acaba de ocupar. ¿Quieres que te ofrezca las otras horas libres de ese día?';
-      }
-      return 'No pude cambiar esa hora en el sistema. ¿Quieres que te ofrezca otra alternativa?';
-    }
-  }
-
-  private async cancelFromConversation(conversation: ConversationDto): Promise<string> {
-    this.logger.log(`AI forced anularCita session=${conversation.id}`);
-    try {
-      const result = (await this.executeTool(
-        { name: 'anularCita', arguments: {} },
-        { celular: conversation.phone },
-      )) as MedilinkCita;
-      const when = [result.fecha, result.hora_inicio?.slice(0, 5)].filter(Boolean).join(' a las ');
-      return when
-        ? `Listo, tu hora del ${when} quedó anulada.`
-        : 'Listo, tu hora quedó anulada.';
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : 'Error desconocido';
-      this.logger.warn(`AI forced anularCita failed: ${detail}`);
-      return 'No pude anular la hora en el sistema. ¿Me confirmas el día y la hora para reintentar?';
-    }
-  }
-
   private async systemPrompt(): Promise<string> {
     const now = new Date();
-    const todayIso = now.toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
-    const weekday = now.toLocaleDateString('es-CL', {
-      weekday: 'long',
-      timeZone: 'America/Santiago',
-    });
-    const horaActual = now.toLocaleTimeString('en-GB', {
-      timeZone: 'America/Santiago',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    });
+    const todayIso = todayInChile();
+    const weekday = now.toLocaleDateString('es-CL', { weekday: 'long', timeZone: TZ });
     const sucursales = await this.listSucursalesPrompt();
-    return buildClinicaHeraPrompt(todayIso, weekday, sucursales, horaActual);
+    return buildClinicaHeraPrompt(todayIso, weekday, sucursales, nowHourInChile());
   }
 
-  private async listSucursalesPrompt() {
+  private async listSucursalesPrompt(): Promise<Sucursal[]> {
     try {
       const items = await this.medilinkService.listSucursales();
       return items
         .filter((item) => item.habilitada !== 0)
-        .map((item) => ({ nombre: item.nombre?.trim() || `Sucursal ${item.id}` }));
+        .map((item) => ({ id: item.id, nombre: item.nombre?.trim() || `Sucursal ${item.id}` }));
     } catch (error) {
       this.logger.warn(
         `No pude leer sucursales para el prompt: ${error instanceof Error ? error.message : 'error'}`,
@@ -243,6 +116,8 @@ export class AiService {
     context: AiToolContext,
   ): Promise<string> {
     const thread = [...messages];
+    const succeeded = new Set<string>();
+    let nudged = false;
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
       const turn = await this.deepseek.completeTurn(thread, AI_TOOLS);
@@ -250,16 +125,34 @@ export class AiService {
         if (!turn.content) {
           throw new HttpException('DeepSeek devolvió una respuesta vacía', 502);
         }
-        return turn.content;
+
+        const unverified = unverifiedClaim(turn.content, succeeded, nudged);
+        if (!unverified) {
+          return turn.content;
+        }
+        if (nudged) {
+          this.logger.warn(`AI afirmó "${unverified}" sin tool OK tras el aviso; respuesta bloqueada`);
+          return AI_FALLBACK_REPLY;
+        }
+        this.logger.warn(`AI afirmó "${unverified}" sin tool OK; se le pide llamarla`);
+        nudged = true;
+        thread.push({
+          role: 'system',
+          content: `Tu respuesta dice que algo quedó ${unverified}, pero en este turno ninguna herramienta lo hizo con éxito. Si el paciente ya confirmó esa acción, llama ahora la herramienta que corresponde. Si solo estás informando el estado de una cita que ya existía, llama verCitas y descríbela sin decir que "quedó" ${unverified}. Nunca afirmes una acción que no se ejecutó.`,
+        });
+        continue;
       }
 
       thread.push(turn.assistantMessage);
       for (const call of turn.toolCalls) {
         const result = await this.safeExecuteTool(call.function.name, call.function.arguments, context);
+        if (result.ok) {
+          succeeded.add(call.function.name);
+        }
         thread.push({
           role: 'tool',
           tool_call_id: call.id,
-          content: result,
+          content: result.content,
         });
       }
     }
@@ -271,21 +164,21 @@ export class AiService {
     name: string,
     rawArgs: string,
     context: AiToolContext,
-  ): Promise<string> {
+  ): Promise<{ ok: boolean; content: string }> {
     let args: Record<string, unknown> = {};
     try {
       args = rawArgs ? (JSON.parse(rawArgs) as Record<string, unknown>) : {};
     } catch {
-      return JSON.stringify({ error: 'Argumentos de tool inválidos' });
+      return { ok: false, content: JSON.stringify({ error: 'Argumentos de tool inválidos' }) };
     }
 
     try {
       const result = await this.executeTool({ name, arguments: args }, context);
-      return JSON.stringify(truncateToolResult(result));
+      return { ok: true, content: JSON.stringify(truncateToolResult(result)) };
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'Error desconocido';
       this.logger.warn(`AI tool ${name} failed: ${detail}`);
-      return JSON.stringify({ error: detail });
+      return { ok: false, content: JSON.stringify({ error: detail }) };
     }
   }
 
@@ -299,18 +192,13 @@ export class AiService {
     this.logger.log(`AI tool ${name} args=${JSON.stringify(args)}`);
 
     switch (name) {
-      case 'buscarPaciente':
-        return this.medilinkService.findPacientes({
-          celular: preferConversationPhone(asString(args.celular), context.celular),
-          rut: asString(args.rut),
-          nombre: asString(args.nombre),
-        });
-
       case 'verCitas': {
-        const paciente = await this.requirePaciente(args, context);
-        const citas = await this.medilinkService.listCitasPaciente(paciente.id);
-        const vigentes = citas.filter((cita) => !isCancelledCita(cita));
-        return vigentes;
+        const paciente = await this.findPaciente(args, context);
+        if (!paciente) {
+          return { tiene_ficha: false, citas: [] };
+        }
+        const citas = await this.citasVigentes(paciente.id);
+        return { tiene_ficha: true, citas: citas.map(toCitaResumen) };
       }
 
       case 'verCupos':
@@ -325,17 +213,30 @@ export class AiService {
         if (!fecha || !hora) {
           throw new HttpException('crearCita requiere fecha y hora_inicio', 400);
         }
+        const paciente = args.para_otra_persona === true
+          ? await this.pacienteDeTercero(args)
+          : await this.requirePaciente(args, context);
+        const idProfesional = await this.resolveProfesionalArg(args);
+        if (!idProfesional) {
+          throw new HttpException(
+            'crearCita requiere el profesional (nombre_profesional o id_profesional). Pregunta al paciente con quién se quiere atender.',
+            400,
+          );
+        }
+        const idSucursal = await this.resolveSucursalArg(args);
+        const reemplazo = args.reemplazo === true;
+        if (!reemplazo) {
+          await this.assertCupoDiario(paciente.id, fecha, idProfesional);
+        }
         return this.medilinkService.createCita({
           fecha,
           hora_inicio: hora,
           duracion: asNumber(args.duracion),
-          comentario: asString(args.comentario),
-          id_profesional: asNumber(args.id_profesional),
-          nombre_profesional: asString(args.nombre_profesional),
-          id_sucursal: asNumber(args.id_sucursal),
-          id_paciente: asNumber(args.id_paciente),
-          celular: preferConversationPhone(asString(args.celular), context.celular),
-          nueva_atencion: args.reemplazo === true,
+          comentario: buildComentario(asString(args.comentario)),
+          id_profesional: idProfesional,
+          id_sucursal: idSucursal,
+          id_paciente: paciente.id,
+          nueva_atencion: reemplazo,
         });
       }
 
@@ -350,35 +251,194 @@ export class AiService {
       }
 
       case 'cambiarCita': {
+        const paciente = await this.requirePaciente(args, context);
         const idCita = await this.requireCitaId(args, context);
+        const idProfesional = await this.resolveProfesionalArg(args);
+        const fecha = asString(args.fecha);
+        if (fecha) {
+          const actual = (await this.citasVigentes(paciente.id)).find((cita) => cita.id === idCita);
+          const profesionalFinal = idProfesional ?? profesionalDe(actual);
+          await this.assertCupoDiario(paciente.id, fecha, profesionalFinal, idCita);
+        }
         return this.medilinkService.changeCita({
           id_cita: idCita,
-          fecha: asString(args.fecha),
+          fecha,
           hora_inicio: asString(args.hora_inicio),
           duracion: asNumber(args.duracion),
-          id_profesional: asNumber(args.id_profesional),
-          nombre_profesional: asString(args.nombre_profesional),
+          id_profesional: idProfesional,
         });
       }
 
-      case 'crearPaciente': {
-        const nombre = asString(args.nombre);
-        const apellidos = asString(args.apellidos);
-        if (!nombre || !apellidos) {
-          throw new HttpException('crearPaciente requiere nombre y apellidos', 400);
-        }
-        return this.medilinkService.createPaciente({
-          nombre,
-          apellidos,
-          celular: preferConversationPhone(asString(args.celular), context.celular),
-          rut: asString(args.rut),
-          email: asString(args.email),
-        });
-      }
+      case 'crearPaciente':
+        return this.crearPaciente(args, context);
 
       default:
         throw new HttpException(`Tool no implementada: ${name}`, 501);
     }
+  }
+
+  private async crearPaciente(args: Record<string, unknown>, context: AiToolContext) {
+    const nombre = asString(args.nombre);
+    const apellidos = asString(args.apellidos);
+    if (!nombre || !apellidos) {
+      throw new HttpException('crearPaciente requiere nombre y apellidos', 400);
+    }
+
+    const paraOtra = args.para_otra_persona === true;
+    const celularAjeno = asString(args.celular);
+    if (paraOtra && !celularAjeno) {
+      throw new HttpException(
+        'Falta el celular de la otra persona. Pídelo. No uses el WhatsApp de quien escribe.',
+        400,
+      );
+    }
+    const celular = paraOtra
+      ? celularAjeno
+      : preferConversationPhone(celularAjeno, context.celular);
+    if (!paraOtra && celular) {
+      const existentes = await this.medilinkService.findPacientes({ celular });
+      if (existentes[0]) {
+        return { ya_existia: true, id_paciente: existentes[0].id };
+      }
+    }
+
+    const extranjero = asBool(args.extranjero);
+    const rutRaw = asString(args.rut);
+    const rutChileno = rutRaw ? normalizeRut(rutRaw) : undefined;
+    if (rutRaw && !rutChileno && extranjero !== true) {
+      throw new HttpException(
+        'RUT inválido (formato o dígito verificador). Pide al paciente que lo revise. Si es extranjero, indícalo y usa su pasaporte.',
+        400,
+      );
+    }
+    const rut = rutChileno ?? (extranjero ? rutRaw : undefined);
+    if (rutChileno) {
+      const porRut = await this.medilinkService.findPacientes({ rut: rutChileno });
+      if (porRut[0]) {
+        if (paraOtra) {
+          return this.fichaTerceroExistente(porRut[0].id, rutChileno, asString(args.direccion), asString(args.comuna));
+        }
+        throw new HttpException(
+          'Ya existe una ficha con ese RUT asociada a otro número. No la modifiques ni des sus datos: entrega el contacto de recepción.',
+          409,
+        );
+      }
+    }
+    if (paraOtra && celular && (rutChileno || rutRaw)) {
+      const porCelular = await this.medilinkService.findPacientes({ celular });
+      const ficha = porCelular[0];
+      if (ficha) {
+        const rutFicha = ficha.rut ? normalizeRut(ficha.rut) : undefined;
+        const rutDistinto =
+          (rutChileno && rutFicha && rutFicha !== rutChileno) ||
+          (!rutChileno && !!ficha.rut?.trim() && fold(ficha.rut) !== fold(rutRaw ?? ''));
+        if (rutDistinto) {
+          throw new HttpException(
+            'Ese celular ya tiene una ficha con otro RUT. No la uses: entrega el contacto de recepción.',
+            409,
+          );
+        }
+        return this.fichaTerceroExistente(
+          ficha.id,
+          rutChileno ?? rutRaw ?? '',
+          asString(args.direccion),
+          asString(args.comuna),
+        );
+      }
+    }
+
+    const email = asString(args.email);
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new HttpException('Falta un correo válido. Pide al paciente que lo revise.', 400);
+    }
+
+    const direccion = asString(args.direccion);
+    const ocupacion = asString(args.ocupacion);
+    if (!direccion || !ocupacion || extranjero === undefined) {
+      throw new HttpException(
+        'Faltan datos de la ficha. Pide solo lo que falte: dirección, ocupación o profesión, y si es extranjero (sí o no).',
+        400,
+      );
+    }
+    if (!rutRaw) {
+      throw new HttpException(
+        extranjero
+          ? 'Falta el pasaporte o el RUT. Pídeselo al paciente.'
+          : 'Falta el RUT. Pídeselo al paciente.',
+        400,
+      );
+    }
+
+    const lugar = inferLugar(direccion, asString(args.comuna));
+    const otroContacto = asString(args.telefono) ?? asString(args.celular);
+    const telefono =
+      otroContacto && celular && !samePhone(otroContacto, celular) ? otroContacto : celular;
+    const creado = await this.medilinkService.createPaciente({
+      nombre,
+      apellidos,
+      celular,
+      telefono,
+      rut,
+      email,
+      direccion,
+      comuna: lugar.comuna,
+      ciudad: lugar.ciudad,
+      observaciones: `Ocupación: ${ocupacion}. Extranjero: ${extranjero ? 'sí' : 'no'}.`,
+    });
+    return {
+      creado: true,
+      id_paciente: creado.id,
+      ...(paraOtra ? { para_otra_persona: true, rut: rut ?? rutRaw } : {}),
+      comuna: lugar.comuna,
+      sucursal_sugerida: lugar.sucursal,
+    };
+  }
+
+  /** La hora de un tercero solo se engancha al id que calza con el RUT recién entregado. */
+  private async pacienteDeTercero(args: Record<string, unknown>): Promise<MedilinkPaciente> {
+    const idPaciente = asNumber(args.id_paciente);
+    const rutRaw = asString(args.rut);
+    if (!idPaciente || !rutRaw) {
+      throw new HttpException(
+        'Para agendar a otra persona hacen falta id_paciente y rut, los que devolvió crearPaciente. No inventes el id.',
+        400,
+      );
+    }
+    const paciente = await this.medilinkService.getPaciente(idPaciente);
+    const rutChileno = normalizeRut(rutRaw);
+    const rutFicha = paciente.rut ? normalizeRut(paciente.rut) : undefined;
+    const calzaRut = rutChileno
+      ? rutFicha === rutChileno
+      : fold(paciente.rut ?? '') === fold(rutRaw);
+    const celular = asString(args.celular);
+    const calzaCelular =
+      !paciente.rut?.trim() &&
+      !!celular &&
+      !!paciente.celular &&
+      samePhone(celular, paciente.celular);
+    if (!calzaRut && !calzaCelular) {
+      throw new HttpException(
+        'Ese id no corresponde al RUT indicado. Usa el id_paciente que devolvió crearPaciente para ese RUT.',
+        400,
+      );
+    }
+    return paciente;
+  }
+
+  private fichaTerceroExistente(
+    idPaciente: number,
+    rut: string,
+    direccion?: string,
+    comuna?: string,
+  ) {
+    const lugar = direccion ? inferLugar(direccion, comuna) : undefined;
+    return {
+      ya_existia: true,
+      para_otra_persona: true,
+      id_paciente: idPaciente,
+      rut,
+      ...(lugar?.sucursal ? { comuna: lugar.comuna, sucursal_sugerida: lugar.sucursal } : {}),
+    };
   }
 
   private async verProfesionales(especialidad?: string) {
@@ -394,21 +454,11 @@ export class AiService {
     return profesionales
       .filter((item) => item.habilitado !== 0)
       .map((item) => {
-        const nombre = [item.nombre, item.apellidos]
-          .filter(Boolean)
-          .join(' ')
-          .replace(/\b(dr\.?|dra\.?|dentista|m[eé]dico)\b/gi, '')
-          .replace(/\s+/g, ' ')
-          .trim();
         const rubro =
           item.especialidad?.trim() ||
           especialidadById.get(item.id_especialidad ?? -1)?.trim() ||
           'Consulta general';
-        return {
-          id: item.id,
-          nombre,
-          especialidad: rubro,
-        };
+        return { id: item.id, nombre: nombreProfesional(item), especialidad: rubro };
       })
       .filter((item) => item.nombre)
       .filter((item) => !needle || fold(`${item.nombre} ${item.especialidad}`).includes(needle));
@@ -417,287 +467,412 @@ export class AiService {
   private async verCupos(args: Record<string, unknown>) {
     const fecha = asString(args.fecha);
     const duracion = asNumber(args.duracion);
-    let idProfesional = asNumber(args.id_profesional);
-    const idSucursal = asNumber(args.id_sucursal);
+    const idProfesional = await this.resolveProfesionalArg(args);
+    const idSucursal = await this.resolveSucursalArg(args, false);
     const idEspecialidad = asNumber(args.id_especialidad);
-    const nombreProfesional = asString(args.nombre_profesional);
-
-    if (!idProfesional && nombreProfesional) {
-      const profesionales = await this.medilinkService.listProfesionales();
-      const needle = fold(nombreProfesional);
-      const match = profesionales.find((item) =>
-        fold(`${item.nombre ?? ''} ${item.apellidos ?? ''}`).includes(needle),
-      );
-      idProfesional = match?.id;
-    }
 
     if (fecha) {
-      let slots = await this.medilinkService.getAgenda({
+      if (!idProfesional) {
+        throw new HttpException(
+          'verCupos con fecha requiere el profesional (nombre_profesional o id_profesional). Si el paciente no tiene preferencia, elige según "Equipo y prestaciones" y consulta a uno a la vez.',
+          400,
+        );
+      }
+      // Sin fallback a otra sucursal: si no hay cupos donde se pidió, se informa así.
+      const slots = await this.medilinkService.getAgenda({
         fecha,
         id_sucursal: idSucursal,
         id_profesional: idProfesional,
         duracion,
       });
-      if (!slots.length && idSucursal) {
-        slots = await this.medilinkService.getAgenda({
-          fecha,
-          id_profesional: idProfesional,
-          duracion,
-        });
-      }
-      const horas = [...new Set(slots.map((slot) => (slot.hora_inicio ?? '').slice(0, 5)).filter(Boolean))];
+      const horas = [
+        ...new Set(slots.map((slot) => (slot.hora_inicio ?? '').slice(0, 5)).filter(Boolean)),
+      ].filter((hora) => fecha !== todayInChile() || hora > nowHourInChile());
       return {
         fecha,
+        fecha_texto: fechaTexto(fecha),
         cantidad: horas.length,
         horas,
         profesional: slots[0]?.nombre_profesional,
       };
     }
 
-    const especialidadId =
-      idEspecialidad ?? (await this.medilinkService.listEspecialidades())[0]?.id;
-    if (!especialidadId) {
-      throw new HttpException('No hay especialidad para consultar cupos', 422);
+    if (!idEspecialidad) {
+      throw new HttpException('verCupos requiere fecha (YYYY-MM-DD).', 400);
     }
-    return this.medilinkService.getProximosCupos(especialidadId);
+    return this.medilinkService.getProximosCupos(idEspecialidad);
+  }
+
+  /** Paciente de la conversación. Con celular de WhatsApp se ignora cualquier id que mande la IA. */
+  private async findPaciente(
+    args: Record<string, unknown>,
+    context: AiToolContext,
+  ): Promise<MedilinkPaciente | undefined> {
+    if (!context.celular) {
+      const idPaciente = asNumber(args.id_paciente);
+      if (idPaciente) {
+        return this.medilinkService.getPaciente(idPaciente);
+      }
+    }
+    const celular = preferConversationPhone(asString(args.celular), context.celular);
+    if (!celular) {
+      throw new HttpException('Falta el celular del paciente', 400);
+    }
+    const matches = await this.medilinkService.findPacientes({ celular });
+    return matches[0];
   }
 
   private async requirePaciente(
     args: Record<string, unknown>,
     context: AiToolContext,
   ): Promise<MedilinkPaciente> {
-    const idPaciente = asNumber(args.id_paciente);
-    if (idPaciente) {
-      return this.medilinkService.getPaciente(idPaciente);
+    const paciente = await this.findPaciente(args, context);
+    if (!paciente) {
+      throw new HttpException(
+        'El paciente no tiene ficha. Sigue "Datos de la ficha" y pide solo el dato que falte. No ofrezcas otro horario ni mandes a recepción.',
+        404,
+      );
     }
-
-    const celular = preferConversationPhone(asString(args.celular), context.celular);
-    if (!celular) {
-      throw new HttpException('Falta celular o id_paciente', 400);
-    }
-
-    const matches = await this.medilinkService.findPacientes({ celular });
-    if (!matches[0]) {
-      throw new HttpException(`No hay paciente en MediLink con celular ${celular}`, 404);
-    }
-    return matches[0];
+    return paciente;
   }
 
+  /** Solo acepta citas vigentes del propio paciente; si hay varias, exige elegir. */
   private async requireCitaId(
     args: Record<string, unknown>,
     context: AiToolContext,
   ): Promise<number> {
+    const paciente = await this.requirePaciente(args, context);
+    const citas = await this.citasVigentes(paciente.id);
     const idCita = asNumber(args.id_cita);
+
     if (idCita) {
+      if (!citas.some((cita) => cita.id === idCita)) {
+        throw new HttpException(
+          'Esa cita no pertenece al paciente o ya no está vigente. Llama verCitas y usa un id_cita de ahí.',
+          404,
+        );
+      }
       return idCita;
     }
-
-    const paciente = await this.requirePaciente(args, context);
-    const citas = (await this.medilinkService.listCitasPaciente(paciente.id)).filter(
-      (cita) => !isCancelledCita(cita),
+    if (citas.length === 1) {
+      return citas[0].id;
+    }
+    if (!citas.length) {
+      throw new HttpException('El paciente no tiene citas vigentes.', 404);
+    }
+    throw new HttpException(
+      `El paciente tiene ${citas.length} citas vigentes. Pregúntale cuál y usa su id_cita (de verCitas).`,
+      409,
     );
-    const next = pickUpcomingCita(citas);
-    if (!next) {
-      throw new HttpException('El paciente no tiene citas para actualizar', 404);
+  }
+
+  /** Citas no anuladas desde ahora en adelante, ordenadas por fecha y hora. */
+  private async citasVigentes(idPaciente: number): Promise<MedilinkCita[]> {
+    const hoy = todayInChile();
+    const ahora = nowHourInChile();
+    const citas = await this.medilinkService.listCitasPaciente(idPaciente);
+    return citas
+      .filter((cita) => !isCancelledCita(cita))
+      .filter((cita) => {
+        const fecha = isoFecha(cita.fecha);
+        if (!fecha) {
+          return false;
+        }
+        return fecha > hoy || (fecha === hoy && (cita.hora_inicio ?? '').slice(0, 5) >= ahora);
+      })
+      .sort((a, b) =>
+        `${isoFecha(a.fecha)} ${a.hora_inicio ?? ''}`.localeCompare(
+          `${isoFecha(b.fecha)} ${b.hora_inicio ?? ''}`,
+        ),
+      );
+  }
+
+  /**
+   * Regla de la clínica: 1 hora por día; excepcionalmente 2 el mismo día con profesionales distintos.
+   * @param excluirCita cita que se está cambiando (no cuenta contra sí misma)
+   */
+  private async assertCupoDiario(
+    idPaciente: number,
+    fecha: string,
+    idProfesional: number | undefined,
+    excluirCita?: number,
+  ): Promise<void> {
+    const delDia = (await this.citasVigentes(idPaciente)).filter(
+      (cita) => cita.id !== excluirCita && isoFecha(cita.fecha) === fecha,
+    );
+    if (idProfesional && delDia.some((cita) => profesionalDe(cita) === idProfesional)) {
+      throw new HttpException(
+        'El paciente ya tiene una hora ese día con ese mismo profesional. No se agenda otra: ofrece otro día.',
+        409,
+      );
     }
-    return next.id;
+    if (delDia.length >= 2) {
+      throw new HttpException(
+        'El paciente ya tiene 2 horas ese día, que es el máximo. Ofrece otro día.',
+        409,
+      );
+    }
   }
-}
 
-function shouldForceChange(userText: string, lastAssistant?: string): boolean {
-  if (isCancelIntent(userText)) {
-    return false;
-  }
-  const hasDetails = Boolean(extractHora(userText) || extractProfesional(userText));
-  if (isChangeIntent(userText) && hasDetails) {
-    return true;
-  }
-  return isAffirmative(userText) && Boolean(lastAssistant && isChangeConfirmPrompt(lastAssistant));
-}
+  /** id del profesional desde id_profesional o nombre_profesional, sin caer a un profesional por defecto. */
+  private async resolveProfesionalArg(args: Record<string, unknown>): Promise<number | undefined> {
+    const profesionales = await this.medilinkService.listProfesionales();
+    const habilitados = profesionales.filter((item) => item.habilitado !== 0);
 
-function isChangeIntent(text: string): boolean {
-  return /(cambi(ar|o)|reprogram|otro profesional|profesional|otra hora|pasarla|moverla)/i.test(
-    text,
-  );
+    const id = asNumber(args.id_profesional);
+    if (id) {
+      if (!habilitados.some((item) => item.id === id)) {
+        throw new HttpException(
+          `No hay un profesional habilitado con id ${id}. Usa nombre_profesional o revisa con verProfesionales.`,
+          404,
+        );
+      }
+      return id;
+    }
+
+    const nombre = asString(args.nombre_profesional);
+    if (!nombre) {
+      return undefined;
+    }
+    const tokens = nameTokens(nombre);
+    if (!tokens.length) {
+      throw new HttpException(`Nombre de profesional no válido: "${nombre}"`, 400);
+    }
+    const matches = habilitados.filter((item) => {
+      const full = fold(`${item.nombre ?? ''} ${item.apellidos ?? ''}`);
+      return tokens.every((token) => full.includes(token));
+    });
+    if (matches.length === 1) {
+      return matches[0].id;
+    }
+    if (!matches.length) {
+      throw new HttpException(
+        `No encontré un profesional habilitado llamado "${nombre}". Revisa con verProfesionales.`,
+        404,
+      );
+    }
+    throw new HttpException(
+      `"${nombre}" calza con varios profesionales: ${matches.map(nombreProfesional).join(', ')}. Pregunta al paciente cuál.`,
+      409,
+    );
+  }
+
+  /** Valida id_sucursal. Si hay más de una sucursal y no viene, crearCita no puede adivinarla. */
+  private async resolveSucursalArg(
+    args: Record<string, unknown>,
+    requerida = true,
+  ): Promise<number | undefined> {
+    const sucursales = (await this.medilinkService.listSucursales()).filter(
+      (item) => item.habilitada !== 0,
+    );
+    const id = asNumber(args.id_sucursal);
+    if (id) {
+      if (!sucursales.some((item) => item.id === id)) {
+        throw new HttpException(
+          `id_sucursal ${id} no existe. Usa un id de la lista de sucursales del prompt.`,
+          400,
+        );
+      }
+      return id;
+    }
+    if (sucursales.length === 1) {
+      return sucursales[0].id;
+    }
+    if (requerida && sucursales.length > 1) {
+      throw new HttpException(
+        'Falta id_sucursal. Pregunta al paciente en qué sucursal quiere atenderse y usa el id de la lista.',
+        400,
+      );
+    }
+    return undefined;
+  }
 }
 
 /**
- * Solo cuenta como confirmación si la IA propuso un horario concreto. Si todavía
- * está pidiendo datos ("¿con qué profesional?"), un "sí" no debe ejecutar el cambio.
+ * Frases con que la IA da por hecha una acción, y qué tool OK la respalda.
+ * En el segundo intento se acepta verCitas como respaldo para estados ya existentes.
  */
-function isChangeConfirmPrompt(text: string): boolean {
-  if (isCancelIntent(text) || !isChangeIntent(text)) {
-    return false;
-  }
-  if (/(qu[eé]|cu[aá]l)\s+profesional|lista de (los )?profesionales/i.test(text)) {
-    return false;
-  }
-  return Boolean(extractHora(text));
-}
-
-function extractProfesional(text: string): string | undefined {
-  const match = text.match(
-    /(?:con|(?:el\s+)?profesional(?:\s+a)?)\s+([A-Za-zÁÉÍÓÚÑáéíóúñ]+(?:\s+[A-Za-zÁÉÍÓÚÑáéíóúñ]+)?)/i,
-  );
-  const name = match?.[1]?.trim();
-  if (!name || /^(a|el|la|un|una)$/i.test(name)) {
-    return undefined;
-  }
-  return name;
-}
-
-function shouldForceBook(userText: string, lastAssistant?: string): boolean {
-  return isAffirmative(userText) && Boolean(lastAssistant && isBookConfirmPrompt(lastAssistant));
-}
-
-function isBookConfirmPrompt(text: string): boolean {
-  if (isCancelIntent(text)) {
-    return false;
-  }
-  return /(agend|te la agendo|confirmas con un|confirmo entonces)/i.test(text);
-}
-
-function extractBooking(texts: string[], todayIso: string): { fecha?: string; hora?: string } {
-  let fecha: string | undefined;
-  let hora: string | undefined;
-  for (const text of [...texts].reverse()) {
-    fecha ??= extractFecha(text, todayIso);
-    hora ??= extractHora(text);
-    if (fecha && hora) {
-      break;
-    }
-  }
-  return { fecha, hora };
-}
-
-function extractFecha(text: string, todayIso: string): string | undefined {
-  const iso = text.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
-  if (iso) {
-    return iso[1];
-  }
-
-  const dayMonth = text.match(
-    /\b(\d{1,2})\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b/i,
-  );
-  if (dayMonth) {
-    return `${todayIso.slice(0, 4)}-${MONTH_NUMBER[fold(dayMonth[2])]}-${dayMonth[1].padStart(2, '0')}`;
-  }
-
-  if (/\bmañana\b/i.test(text)) {
-    return addIsoDays(todayIso, 1);
-  }
-  return undefined;
-}
-
-function extractHora(text: string): string | undefined {
-  const clock = text.match(/\b(\d{1,2})[:.](\d{2})\b/);
-  if (clock && Number(clock[1]) <= 23 && Number(clock[2]) < 60) {
-    return `${clock[1].padStart(2, '0')}:${clock[2]}`;
-  }
-
-  // "a las 1130" o "1130 hrs": pegado, sin separador.
-  const compact =
-    text.match(/\blas\s+(\d{1,2})(\d{2})\b/i) ??
-    text.match(/\b(\d{1,2})(\d{2})\s*(?:hrs?|horas)\b/i);
-  if (compact && Number(compact[1]) <= 23 && Number(compact[2]) < 60) {
-    return `${compact[1].padStart(2, '0')}:${compact[2]}`;
-  }
-
-  const spoken = text.match(
-    /\blas\s+(\d{1,2})(?:\s+y\s+(media|treinta))?(?:\s+de\s+la\s+(mañana|tarde|noche))?\b/i,
-  );
-  if (!spoken) {
-    return undefined;
-  }
-  let hour = Number(spoken[1]);
-  const period = spoken[3]?.toLowerCase();
-  if ((period === 'tarde' || period === 'noche') && hour < 12) {
-    hour += 12;
-  }
-  return `${String(hour).padStart(2, '0')}:${spoken[2] ? '30' : '00'}`;
-}
-
-/**
- * La pregunta de confirmación menciona la hora vigente y la nueva ("tu cita es a
- * las 11:00, ¿la cambio a las 11:30?"), así que hay que tomar la que no es la actual.
- */
-function extractHoraObjetivo(text: string, horaActual?: string): string | undefined {
-  const horas = [...text.matchAll(/\b(\d{1,2})[:.](\d{2})\b/g)]
-    .filter((match) => Number(match[1]) <= 23 && Number(match[2]) < 60)
-    .map((match) => `${match[1].padStart(2, '0')}:${match[2]}`);
-  return [...horas].reverse().find((hora) => hora !== horaActual) ?? extractHora(text);
-}
-
-function addIsoDays(iso: string, days: number): string {
-  const date = new Date(`${iso}T12:00:00`);
-  date.setDate(date.getDate() + days);
-  return date.toISOString().slice(0, 10);
-}
-
-const MONTH_NUMBER: Record<string, string> = {
-  enero: '01',
-  febrero: '02',
-  marzo: '03',
-  abril: '04',
-  mayo: '05',
-  junio: '06',
-  julio: '07',
-  agosto: '08',
-  septiembre: '09',
-  octubre: '10',
-  noviembre: '11',
-  diciembre: '12',
-};
-
-function shouldForceCancel(userText: string, lastAssistant?: string): boolean {
-  if (isCancelIntent(userText)) {
-    return true;
-  }
-  return isAffirmative(userText) && Boolean(lastAssistant && isCancelIntent(lastAssistant));
-}
-
-function isCancelIntent(text: string): boolean {
-  if (/(no (la |lo )?(cancel|anul)|no quiero (cancel|anul))/i.test(text)) {
-    return false;
-  }
-  return /(cancelar|anula(r|s|e)?|elimina(r)? (la )?cita|borra(r)? (la )?hora)/i.test(text);
+function unverifiedClaim(
+  text: string,
+  succeeded: Set<string>,
+  segundoIntento: boolean,
+): string | undefined {
+  const ok = (...names: string[]) => names.some((name) => succeeded.has(name));
+  const claims: Array<{ label: string; re: RegExp; backed: () => boolean }> = [
+    {
+      label: 'agendada',
+      re: /qued[oó]\s+(agendad|reservad)|te\s+(la\s+)?agend[eé]/i,
+      backed: () => ok('crearCita') || (segundoIntento && ok('verCitas')),
+    },
+    {
+      label: 'cambiada',
+      re: /qued[oó]\s+(cambiad|modificad|movid|reprogramad)/i,
+      backed: () => ok('cambiarCita') || (ok('crearCita') && ok('anularCita')),
+    },
+    {
+      label: 'anulada',
+      re: /qued[oó]\s+anulad|anul[eé]\s+tu/i,
+      backed: () => ok('anularCita'),
+    },
+    {
+      label: 'confirmada',
+      re: /qued[oó]\s+confirmad|confirm[eé]\s+tu\s+asistencia/i,
+      backed: () => ok('confirmarCita') || (segundoIntento && ok('verCitas')),
+    },
+    {
+      label: 'creada',
+      re: /(cre[eé]|qued[oó]\s+cread[ao])\s+tu\s+ficha|tu\s+ficha\s+qued[oó]/i,
+      backed: () => ok('crearPaciente'),
+    },
+  ];
+  return claims.find((claim) => claim.re.test(text) && !claim.backed())?.label;
 }
 
 function isAvailabilityIntent(text: string): boolean {
-  if (isCancelIntent(text)) {
-    return false;
-  }
   if (/(cupos?|disponibilidad|disponibles?)/i.test(text)) {
     return true;
   }
   if (/\bhay\b/i.test(text) && /(hora|\d{1,2}([:.]\d{2})?|ma[ñn]ana|tarde)/i.test(text)) {
     return true;
   }
-  return /\bhoras?\b/i.test(text) &&
-    /(qu[eé]|cu[aá]l|dime|mu[eé]stra|muestra|ver|tiene|tienes|quedan|libres)/i.test(text);
+  return (
+    /\bhoras?\b/i.test(text) &&
+    /(qu[eé]|cu[aá]l|dime|mu[eé]stra|muestra|ver|tiene|tienes|quedan|libres)/i.test(text)
+  );
 }
 
-const AFFIRMATIVE_START = /^(si|ok|okey|oka|dale|ya|listo|claro|confirmo|confirma|confirmado|perfecto|sipo|sale|bueno)$/;
+const DIAS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+const MESES = [
+  'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+  'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
+];
 
-const AFFIRMATIVE_FILLER = new Set([
-  'si', 'ok', 'okey', 'oka', 'dale', 'ya', 'listo', 'claro', 'confirmo', 'confirma',
-  'confirmado', 'perfecto', 'sipo', 'sale', 'bueno', 'de', 'acuerdo', 'por', 'favor',
-  'porfavor', 'porfa', 'pf', 'gracias', 'esa', 'eso', 'esta', 'mismo',
+/** "2026-10-15" → "jueves 15 de octubre", para que la IA no muestre fechas ISO. */
+function fechaTexto(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  if (!y || !m || !d) {
+    return iso;
+  }
+  const date = new Date(Date.UTC(y, m - 1, d));
+  return `${DIAS[date.getUTCDay()]} ${d} de ${MESES[m - 1]}`;
+}
+
+function toCitaResumen(cita: MedilinkCita) {
+  const fecha = isoFecha(cita.fecha) ?? '';
+  return {
+    id_cita: cita.id,
+    fecha,
+    fecha_texto: fecha ? fechaTexto(fecha) : undefined,
+    hora: (cita.hora_inicio ?? '').slice(0, 5),
+    profesional: cita.nombre_profesional ?? cita.nombre_dentista,
+    id_profesional: profesionalDe(cita),
+    sucursal: cita.nombre_sucursal,
+    id_sucursal: cita.id_sucursal,
+    estado: cita.estado_cita,
+  };
+}
+
+function buildComentario(comentario?: string): string {
+  return comentario ? `${comentario} (agendada por WhatsApp)` : 'Agendada por WhatsApp';
+}
+
+function profesionalDe(cita?: MedilinkCita): number | undefined {
+  return cita?.id_profesional ?? cita?.id_dentista;
+}
+
+function nombreProfesional(item: MedilinkProfesional): string {
+  return [item.nombre, item.apellidos]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\b(dr\.?|dra\.?|dentista|m[eé]dico)(?=\s|$)/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const NAME_STOPWORDS = new Set([
+  'dr', 'dra', 'doctor', 'doctora', 'matrona', 'kine', 'kinesiologa', 'kinesiologo',
+  'con', 'la', 'el', 'los', 'las', 'del', 'de', 'y',
 ]);
 
-/**
- * Un "sí" suelto confirma; "si, muestra la lista" es una petición nueva y no debe
- * disparar los flujos forzados de cambio o agendamiento.
- */
-function isAffirmative(text: string): boolean {
-  const words = fold(text)
-    .replace(/[^a-z0-9ñ\s]/g, ' ')
+function nameTokens(value: string): string[] {
+  return fold(value)
+    .replace(/[^a-zñ\s]/g, ' ')
     .split(/\s+/)
-    .filter(Boolean);
-  if (!words.length || !AFFIRMATIVE_START.test(words[0])) {
+    .filter((token) => token.length > 2 && !NAME_STOPWORDS.has(token));
+}
+
+/** Valida RUT chileno (módulo 11). Devuelve "12345678-5" o undefined si no es válido. */
+export function normalizeRut(raw: string): string | undefined {
+  const clean = raw.replace(/[.\s-]/g, '').toUpperCase();
+  const match = clean.match(/^(\d{7,8})([0-9K])$/);
+  if (!match) {
+    return undefined;
+  }
+  const [, body, dv] = match;
+  let sum = 0;
+  let factor = 2;
+  for (let i = body.length - 1; i >= 0; i -= 1) {
+    sum += Number(body[i]) * factor;
+    factor = factor === 7 ? 2 : factor + 1;
+  }
+  const rest = 11 - (sum % 11);
+  const expected = rest === 11 ? '0' : rest === 10 ? 'K' : String(rest);
+  return expected === dv ? `${body}-${dv}` : undefined;
+}
+
+function todayInChile(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: TZ });
+}
+
+function nowHourInChile(): string {
+  return new Date().toLocaleTimeString('en-GB', {
+    timeZone: TZ,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function isoFecha(fecha?: string): string | undefined {
+  if (!fecha) {
+    return undefined;
+  }
+  return fecha.includes('/') ? toIsoDate(fecha) : fecha.slice(0, 10);
+}
+
+function asBool(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const text = fold(value);
+  if (['si', 'true', '1', 'extranjero'].includes(text)) {
+    return true;
+  }
+  if (['no', 'false', '0', 'chileno', 'chilena'].includes(text)) {
     return false;
   }
-  return words.every((word) => AFFIRMATIVE_FILLER.has(word));
+  return undefined;
+}
+
+/** La dirección decide si la hora queda en La Serena o en Coquimbo. */
+function inferLugar(
+  direccion: string,
+  comuna?: string,
+): { comuna: string; ciudad: string; sucursal: string } {
+  const text = fold(`${direccion} ${comuna ?? ''}`);
+  const coquimbo = /coquimbo|tierras blancas|guayacan|sindempart|penuelas|la cantera/.test(text);
+  const serena = /la serena|\bserena\b|las companias|la florida|la pampa|el milagro|cerro grande/.test(text);
+  if (coquimbo && !serena) {
+    return { comuna: 'Coquimbo', ciudad: 'Coquimbo', sucursal: 'Coquimbo' };
+  }
+  if (serena && !coquimbo) {
+    return { comuna: 'La Serena', ciudad: 'La Serena', sucursal: 'La Serena' };
+  }
+  const fallback = comuna?.trim() || '';
+  return { comuna: fallback, ciudad: fallback, sucursal: '' };
 }
 
 function preferConversationPhone(arg?: string, context?: string): string | undefined {
@@ -738,36 +913,19 @@ function asNumber(value: unknown): number | undefined {
 }
 
 function truncateToolResult(value: unknown): unknown {
-  if (value && typeof value === 'object' && !Array.isArray(value) && 'horas' in value) {
-    return value;
-  }
   if (!Array.isArray(value)) {
     return value;
   }
   if (value[0] && typeof value[0] === 'object' && value[0] !== null && 'hora_inicio' in value[0]) {
     return value;
   }
-  return value.slice(0, 12);
-}
-
-function isSameProfesional(nombre: string | undefined, cita: MedilinkCita): boolean {
-  if (!nombre) {
-    return true;
-  }
-  const actual = fold(cita.nombre_profesional ?? cita.nombre_dentista ?? '');
-  if (!actual) {
-    return true;
-  }
-  return fold(nombre)
-    .split(/\s+/)
-    .filter((part) => part.length > 2)
-    .some((part) => actual.includes(part));
+  return value.slice(0, 40);
 }
 
 function fold(value: string): string {
   return value
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     .trim();
 }
@@ -783,39 +941,18 @@ function isCancelledCita(cita: MedilinkCita): boolean {
   return false;
 }
 
-function pickUpcomingCita(citas: MedilinkCita[]): MedilinkCita | undefined {
-  const now = Date.now();
-  const ranked = citas
-    .filter((cita) => !isCancelledCita(cita))
-    .map((cita) => ({ cita, time: citaTimestamp(cita) }))
-    .filter((item) => item.time === undefined || item.time >= now)
-    .sort((left, right) => {
-      const leftLive = left.cita.estado_anulacion === 1 ? 1 : 0;
-      const rightLive = right.cita.estado_anulacion === 1 ? 1 : 0;
-      if (leftLive !== rightLive) {
-        return leftLive - rightLive;
-      }
-      const leftUpdated = Date.parse(left.cita.fecha_actualizacion ?? '') || 0;
-      const rightUpdated = Date.parse(right.cita.fecha_actualizacion ?? '') || 0;
-      if (leftUpdated !== rightUpdated) {
-        return rightUpdated - leftUpdated;
-      }
-      return (right.time ?? 0) - (left.time ?? 0);
-    });
-
-  return ranked[0]?.cita;
-}
-
-function citaTimestamp(cita: MedilinkCita): number | undefined {
-  if (!cita.fecha) {
-    return undefined;
+/** Varios mensajes seguidos del paciente cuentan como una sola idea. */
+function collapseUserRuns<T extends { role: string; content: string }>(messages: T[]): T[] {
+  const collapsed: T[] = [];
+  for (const message of messages) {
+    const previous = collapsed[collapsed.length - 1];
+    if (message.role === 'user' && previous?.role === 'user') {
+      previous.content = `${previous.content}\n${message.content}`;
+      continue;
+    }
+    collapsed.push({ ...message });
   }
-  const time = (cita.hora_inicio ?? '00:00').slice(0, 5);
-  const iso = cita.fecha.includes('/')
-    ? toIsoDate(cita.fecha)
-    : cita.fecha;
-  const parsed = Date.parse(`${iso}T${time}:00`);
-  return Number.isNaN(parsed) ? undefined : parsed;
+  return collapsed;
 }
 
 function toIsoDate(value: string): string {

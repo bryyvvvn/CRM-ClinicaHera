@@ -45,6 +45,12 @@
   --hera-chat-incoming: #ffffff;
   --hera-chat-outgoing: #eaf6f8;
 
+  /* Alertas (requiere atención) */
+  --hera-alert: #b4530a;
+  --hera-alert-soft: #fff4e6;
+  --hera-alert-strong: #7a3806;
+  --hera-on-alert: #ffffff;
+
   color-scheme: light;
 }
 
@@ -108,6 +114,12 @@
   --hera-chat-background: #111315;
   --hera-chat-incoming: #25282d;
   --hera-chat-outgoing: #1d4f5d;
+
+  /* Alertas (requiere atención) */
+  --hera-alert: #f0a24a;
+  --hera-alert-soft: #33261a;
+  --hera-alert-strong: #f6c27f;
+  --hera-on-alert: #1a1206;
 
   color-scheme: dark;
 }
