@@ -182,6 +182,9 @@ export function ChatLayout({ searchQuery }: ChatLayoutProps) {
   const [pending, setPending] = useState<{ sessionId: string; action: PendingAction } | null>(null);
   const [actionError, setActionError] = useState<{ sessionId: string; message: string } | null>(null);
   const [notificationPermission, setNotificationPermission] = useState(initialPermission);
+  const [summaryState, setSummaryState] = useState<{ id: string; status: 'loading' | 'error' } | null>(
+    null,
+  );
 
   const byIdRef = useRef(lists.byId);
   useEffect(() => {
@@ -309,6 +312,42 @@ export function ChatLayout({ searchQuery }: ChatLayoutProps) {
 
   const selected = selectedId ? lists.byId[selectedId] : undefined;
 
+  useEffect(() => {
+    if (!selected) {
+      return;
+    }
+    const wantsBriefing = Boolean(selected.needsAttention) || !selected.isAiActive;
+    if (!wantsBriefing) {
+      return;
+    }
+    const controller = new AbortController();
+    setSummaryState({ id: selected.id, status: 'loading' });
+    void fetch(`${API_URL}/ai/sessions/${selected.id}/summary`, { signal: controller.signal })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: { summary?: string | null; handoffSummaryAt?: string | null } | null) => {
+        if (!data?.summary) {
+          setSummaryState({ id: selected.id, status: 'error' });
+          return;
+        }
+        setSummaryState(null);
+        dispatch({
+          type: 'upsert',
+          conversation: {
+            id: selected.id,
+            handoffSummary: data.summary,
+            handoffSummaryAt: data.handoffSummaryAt ?? null,
+          },
+        });
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          return;
+        }
+        setSummaryState({ id: selected.id, status: 'error' });
+      });
+    return () => controller.abort();
+  }, [selected?.id, selected?.needsAttention, selected?.isAiActive, selected?.lastMessage]);
+
   const handleSelect = (id: string) => {
     setSelectedId(id);
     setMobileChatVisible(true);
@@ -375,6 +414,7 @@ export function ChatLayout({ searchQuery }: ChatLayoutProps) {
           onClearAttention={() => void runAction('clearAttention', clearAttention)}
           pendingAction={pending && pending.sessionId === selectedId ? pending.action : null}
           actionError={actionError && actionError.sessionId === selectedId ? actionError.message : null}
+          summaryStatus={summaryState && summaryState.id === selectedId ? summaryState.status : 'idle'}
           onSend={sendMessage}
           onTyping={notifyTyping}
           assistantTyping={assistantTyping}

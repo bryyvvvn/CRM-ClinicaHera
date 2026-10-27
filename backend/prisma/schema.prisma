@@ -38,6 +38,8 @@ model ChatSession {
   needsAttention  Boolean    @default(false)
   attentionReason String?
   attentionAt     DateTime?
+  handoffSummary   String?   @db.Text
+  handoffSummaryAt DateTime?
   messages        Message[]
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt

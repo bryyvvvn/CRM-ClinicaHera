@@ -21,6 +21,8 @@ export type Conversation = {
   needsAttention?: boolean;
   attentionReason?: string | null;
   attentionAt?: string | null;
+  handoffSummary?: string | null;
+  handoffSummaryAt?: string | null;
 };
 
 export type ResolvedListStatus = 'idle' | 'loading' | 'loaded' | 'error';

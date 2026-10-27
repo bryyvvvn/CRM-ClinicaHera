@@ -19,6 +19,10 @@ import {
 
 const HISTORY_LIMIT = 16;
 const MAX_TOOL_ROUNDS = 6;
+const HANDOFF_SUMMARY_PROMPT = `Eres quien deja el parte para la secretaria de Clínica Hera.
+Resume el chat en español de Chile, en 4 o 5 líneas, sin markdown ni viñetas.
+Di quién escribe, si la hora es para esa persona o para otra, a qué viene, qué datos ya dio y en qué se atascó.
+No inventes datos que no estén en el chat. Si falta un dato, dilo en una frase.`;
 const TZ = 'America/Santiago';
 export const AI_FALLBACK_REPLY =
   'No alcancé a completar eso en el sistema. ¿Me confirmas de nuevo para intentarlo?';
@@ -87,6 +91,39 @@ export class AiService {
 
     this.logger.log(`AI reply session=${conversation.id} turns=${recent.length}`);
     return this.runWithTools(messages, { celular: conversation.phone });
+  }
+
+  async ensureHandoffSummary(sessionId: string): Promise<string | null> {
+    const source = await this.chatService.summarySource(sessionId);
+    if (!source) {
+      return null;
+    }
+    const wanted = source.needsAttention || !source.isAiActive;
+    if (!wanted || source.fresh) {
+      return source.handoffSummary;
+    }
+    const latest = source.messages.at(-1);
+    if (!latest) {
+      return null;
+    }
+    const transcript = source.messages
+      .map((message) => {
+        const who =
+          message.role === 'user'
+            ? 'Paciente'
+            : message.role === 'assistant'
+              ? 'Bot'
+              : 'Sistema';
+        return `${who}: ${message.content}`;
+      })
+      .join('\n');
+    const summary = await this.deepseek.chat([
+      { role: 'system', content: HANDOFF_SUMMARY_PROMPT },
+      { role: 'user', content: transcript },
+    ]);
+    await this.chatService.saveHandoffSummary(sessionId, summary, latest.createdAt);
+    this.logger.log(`Handoff summary session=${sessionId} chars=${summary.length}`);
+    return summary;
   }
 
   private async systemPrompt(): Promise<string> {
@@ -208,12 +245,12 @@ export class AiService {
         return this.verProfesionales(asString(args.especialidad));
 
       case 'crearCita': {
-        const fecha = asString(args.fecha);
-        const hora = asString(args.hora_inicio);
+        const fecha = canonicalFecha(asString(args.fecha));
+        const hora = horaCorta(asString(args.hora_inicio));
         if (!fecha || !hora) {
           throw new HttpException('crearCita requiere fecha y hora_inicio', 400);
         }
-        const paciente = args.para_otra_persona === true
+        const paciente = asTrue(args.para_otra_persona)
           ? await this.pacienteDeTercero(args)
           : await this.requirePaciente(args, context);
         const idProfesional = await this.resolveProfesionalArg(args);
@@ -224,7 +261,7 @@ export class AiService {
           );
         }
         const idSucursal = await this.resolveSucursalArg(args);
-        const reemplazo = args.reemplazo === true;
+        const reemplazo = asTrue(args.reemplazo);
         if (!reemplazo) {
           await this.assertCupoDiario(paciente.id, fecha, idProfesional);
         }
@@ -254,7 +291,16 @@ export class AiService {
         const paciente = await this.requirePaciente(args, context);
         const idCita = await this.requireCitaId(args, context);
         const idProfesional = await this.resolveProfesionalArg(args);
-        const fecha = asString(args.fecha);
+        const fechaRaw = asString(args.fecha);
+        const fecha = canonicalFecha(fechaRaw);
+        if (fechaRaw && !fecha) {
+          throw new HttpException('La fecha tiene que ir como YYYY-MM-DD.', 400);
+        }
+        const horaRaw = asString(args.hora_inicio);
+        const hora = horaCorta(horaRaw);
+        if (horaRaw && !hora) {
+          throw new HttpException('La hora tiene que ir como HH:mm.', 400);
+        }
         if (fecha) {
           const actual = (await this.citasVigentes(paciente.id)).find((cita) => cita.id === idCita);
           const profesionalFinal = idProfesional ?? profesionalDe(actual);
@@ -262,8 +308,8 @@ export class AiService {
         }
         return this.medilinkService.changeCita({
           id_cita: idCita,
-          fecha,
-          hora_inicio: asString(args.hora_inicio),
+          fecha: fecha || undefined,
+          hora_inicio: hora || undefined,
           duracion: asNumber(args.duracion),
           id_profesional: idProfesional,
         });
@@ -284,7 +330,7 @@ export class AiService {
       throw new HttpException('crearPaciente requiere nombre y apellidos', 400);
     }
 
-    const paraOtra = args.para_otra_persona === true;
+    const paraOtra = asTrue(args.para_otra_persona);
     const celularAjeno = asString(args.celular);
     if (paraOtra && !celularAjeno) {
       throw new HttpException(
@@ -312,11 +358,16 @@ export class AiService {
       );
     }
     const rut = rutChileno ?? (extranjero ? rutRaw : undefined);
-    if (rutChileno) {
-      const porRut = await this.medilinkService.findPacientes({ rut: rutChileno });
-      if (porRut[0]) {
+    if (rutRaw && (rutChileno || extranjero === true)) {
+      const porDocumento = await this.findFichaPorDocumento(rutRaw);
+      if (porDocumento) {
         if (paraOtra) {
-          return this.fichaTerceroExistente(porRut[0].id, rutChileno, asString(args.direccion), asString(args.comuna));
+          return this.fichaTerceroExistente(
+            porDocumento.id,
+            rutChileno ?? rutRaw,
+            asString(args.direccion),
+            asString(args.comuna),
+          );
         }
         throw new HttpException(
           'Ya existe una ficha con ese RUT asociada a otro número. No la modifiques ni des sus datos: entrega el contacto de recepción.',
@@ -328,10 +379,8 @@ export class AiService {
       const porCelular = await this.medilinkService.findPacientes({ celular });
       const ficha = porCelular[0];
       if (ficha) {
-        const rutFicha = ficha.rut ? normalizeRut(ficha.rut) : undefined;
         const rutDistinto =
-          (rutChileno && rutFicha && rutFicha !== rutChileno) ||
-          (!rutChileno && !!ficha.rut?.trim() && fold(ficha.rut) !== fold(rutRaw ?? ''));
+          !!ficha.rut?.trim() && !sameDocument(ficha.rut, rutChileno ?? rutRaw ?? '');
         if (rutDistinto) {
           throw new HttpException(
             'Ese celular ya tiene una ficha con otro RUT. No la uses: entrega el contacto de recepción.',
@@ -405,11 +454,7 @@ export class AiService {
       );
     }
     const paciente = await this.medilinkService.getPaciente(idPaciente);
-    const rutChileno = normalizeRut(rutRaw);
-    const rutFicha = paciente.rut ? normalizeRut(paciente.rut) : undefined;
-    const calzaRut = rutChileno
-      ? rutFicha === rutChileno
-      : fold(paciente.rut ?? '') === fold(rutRaw);
+    const calzaRut = sameDocument(paciente.rut ?? '', rutRaw);
     const celular = asString(args.celular);
     const calzaCelular =
       !paciente.rut?.trim() &&
@@ -464,8 +509,22 @@ export class AiService {
       .filter((item) => !needle || fold(`${item.nombre} ${item.especialidad}`).includes(needle));
   }
 
+  private async findFichaPorDocumento(rutRaw: string): Promise<MedilinkPaciente | undefined> {
+    for (const rut of documentVariants(rutRaw)) {
+      const found = await this.medilinkService.findPacientes({ rut });
+      if (found[0]) {
+        return found[0];
+      }
+    }
+    return undefined;
+  }
+
   private async verCupos(args: Record<string, unknown>) {
-    const fecha = asString(args.fecha);
+    const fechaRaw = asString(args.fecha);
+    const fecha = canonicalFecha(fechaRaw);
+    if (fechaRaw && !fecha) {
+      throw new HttpException('La fecha tiene que ir como YYYY-MM-DD.', 400);
+    }
     const duracion = asNumber(args.duracion);
     const idProfesional = await this.resolveProfesionalArg(args);
     const idSucursal = await this.resolveSucursalArg(args, false);
@@ -486,7 +545,7 @@ export class AiService {
         duracion,
       });
       const horas = [
-        ...new Set(slots.map((slot) => (slot.hora_inicio ?? '').slice(0, 5)).filter(Boolean)),
+        ...new Set(slots.map((slot) => horaCorta(slot.hora_inicio)).filter(Boolean)),
       ].filter((hora) => fecha !== todayInChile() || hora > nowHourInChile());
       return {
         fecha,
@@ -578,11 +637,11 @@ export class AiService {
         if (!fecha) {
           return false;
         }
-        return fecha > hoy || (fecha === hoy && (cita.hora_inicio ?? '').slice(0, 5) >= ahora);
+        return fecha > hoy || (fecha === hoy && horaCorta(cita.hora_inicio) >= ahora);
       })
       .sort((a, b) =>
-        `${isoFecha(a.fecha)} ${a.hora_inicio ?? ''}`.localeCompare(
-          `${isoFecha(b.fecha)} ${b.hora_inicio ?? ''}`,
+        `${isoFecha(a.fecha)} ${horaCorta(a.hora_inicio)}`.localeCompare(
+          `${isoFecha(b.fecha)} ${horaCorta(b.hora_inicio)}`,
         ),
       );
   }
@@ -598,7 +657,7 @@ export class AiService {
     excluirCita?: number,
   ): Promise<void> {
     const delDia = (await this.citasVigentes(idPaciente)).filter(
-      (cita) => cita.id !== excluirCita && isoFecha(cita.fecha) === fecha,
+      (cita) => cita.id !== excluirCita && isoFecha(cita.fecha) === isoFecha(fecha),
     );
     if (idProfesional && delDia.some((cita) => profesionalDe(cita) === idProfesional)) {
       throw new HttpException(
@@ -747,14 +806,17 @@ const MESES = [
   'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
 ];
 
-/** "2026-10-15" → "jueves 15 de octubre", para que la IA no muestre fechas ISO. */
+/** "2026-10-15" → "jueves 15 de octubre de 2026", para que la IA no muestre fechas ISO. */
 function fechaTexto(iso: string): string {
   const [y, m, d] = iso.split('-').map(Number);
-  if (!y || !m || !d) {
+  if (!y || !m || !d || m > 12) {
     return iso;
   }
   const date = new Date(Date.UTC(y, m - 1, d));
-  return `${DIAS[date.getUTCDay()]} ${d} de ${MESES[m - 1]}`;
+  if (date.getUTCMonth() !== m - 1) {
+    return iso;
+  }
+  return `${DIAS[date.getUTCDay()]} ${d} de ${MESES[m - 1]} de ${y}`;
 }
 
 function toCitaResumen(cita: MedilinkCita) {
@@ -763,7 +825,7 @@ function toCitaResumen(cita: MedilinkCita) {
     id_cita: cita.id,
     fecha,
     fecha_texto: fecha ? fechaTexto(fecha) : undefined,
-    hora: (cita.hora_inicio ?? '').slice(0, 5),
+    hora: horaCorta(cita.hora_inicio),
     profesional: cita.nombre_profesional ?? cita.nombre_dentista,
     id_profesional: profesionalDe(cita),
     sucursal: cita.nombre_sucursal,
@@ -818,6 +880,45 @@ export function normalizeRut(raw: string): string | undefined {
   const rest = 11 - (sum % 11);
   const expected = rest === 11 ? '0' : rest === 10 ? 'K' : String(rest);
   return expected === dv ? `${body}-${dv}` : undefined;
+}
+
+function asTrue(value: unknown): boolean {
+  return value === true || value === 1 || value === 'true' || value === '1';
+}
+
+function canonicalFecha(value?: string): string {
+  const trimmed = value?.trim() ?? '';
+  if (!trimmed) {
+    return '';
+  }
+  const iso = trimmed.includes('/') ? toIsoDate(trimmed) : trimmed.slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(iso) ? iso : '';
+}
+
+function horaCorta(value?: string): string {
+  const match = /^(\d{1,2}):(\d{2})/.exec(value ?? '');
+  if (!match) {
+    return '';
+  }
+  return `${match[1].padStart(2, '0')}:${match[2]}`;
+}
+
+function compactDocument(value: string): string {
+  return value.replace(/[^a-z0-9]/gi, '').toLowerCase();
+}
+
+function sameDocument(left: string, right: string): boolean {
+  const a = compactDocument(left);
+  const b = compactDocument(right);
+  return a.length > 0 && a === b;
+}
+
+function documentVariants(raw: string): string[] {
+  const trimmed = raw.trim();
+  const compact = compactDocument(trimmed);
+  const hyphen = compact.length > 1 ? `${compact.slice(0, -1)}-${compact.slice(-1)}` : '';
+  const chile = normalizeRut(trimmed);
+  return [...new Set([trimmed, chile, compact, hyphen].filter((item): item is string => Boolean(item)))];
 }
 
 function todayInChile(): string {

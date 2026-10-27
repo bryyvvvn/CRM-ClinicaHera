@@ -1,0 +1,2 @@
+ALTER TABLE "ChatSession" ADD COLUMN IF NOT EXISTS "handoffSummary" TEXT;
+ALTER TABLE "ChatSession" ADD COLUMN IF NOT EXISTS "handoffSummaryAt" TIMESTAMP(3);

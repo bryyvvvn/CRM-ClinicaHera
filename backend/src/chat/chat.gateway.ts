@@ -56,6 +56,10 @@ export class ChatGateway {
     this.server.emit('assistantTyping', { sessionId, active });
   }
 
+  notifyConversation(sessionId: string): void {
+    void this.emitConversation(sessionId);
+  }
+
   @SubscribeMessage('joinSession')
   async joinSession(
     @ConnectedSocket() client: SocketClient,

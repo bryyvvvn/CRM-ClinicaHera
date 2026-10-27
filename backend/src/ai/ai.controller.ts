@@ -1,4 +1,6 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Body, Controller, Get, Logger, Param, Post } from '@nestjs/common';
+import { ChatGateway } from '../chat/chat.gateway.js';
+import { ChatService } from '../chat/chat.service.js';
 import { AiService } from './ai.service.js';
 
 type ExecuteToolBody = {
@@ -9,7 +11,13 @@ type ExecuteToolBody = {
 
 @Controller('ai')
 export class AiController {
-  constructor(private readonly aiService: AiService) {}
+  private readonly logger = new Logger(AiController.name);
+
+  constructor(
+    private readonly aiService: AiService,
+    private readonly chatService: ChatService,
+    private readonly chatGateway: ChatGateway,
+  ) {}
 
   @Get('tools')
   listTools() {
@@ -22,6 +30,25 @@ export class AiController {
       { name: body.name, arguments: body.arguments },
       { celular: body.celular },
     );
+  }
+
+  @Get('sessions/:id/summary')
+  async summary(@Param('id') id: string) {
+    try {
+      const summary = await this.aiService.ensureHandoffSummary(id);
+      const conversation = await this.chatService.getConversation(id);
+      if (summary) {
+        this.chatGateway.notifyConversation(id);
+      }
+      return {
+        summary,
+        handoffSummaryAt: conversation?.handoffSummaryAt ?? null,
+      };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Error desconocido';
+      this.logger.warn(`Handoff summary failed session=${id}: ${detail}`);
+      return { summary: null, handoffSummaryAt: null };
+    }
   }
 
   @Post('complete')

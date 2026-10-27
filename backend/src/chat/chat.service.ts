@@ -10,6 +10,7 @@ import type {
   ChatMessageDto,
   ConversationDto,
   ConversationPage,
+  HandoffSource,
   SessionActionResult,
 } from './chat.types.js';
 
@@ -187,6 +188,51 @@ export class ChatService {
     return session?.status ?? null;
   }
 
+  async summarySource(sessionId: string): Promise<HandoffSource | null> {
+    const session = await this.prisma.chatSession.findUnique({
+      where: { id: sessionId },
+      select: {
+        isAiActive: true,
+        needsAttention: true,
+        handoffSummary: true,
+        handoffSummaryAt: true,
+      },
+    });
+    if (!session) {
+      return null;
+    }
+    const recent = await this.prisma.message.findMany({
+      where: { chatSessionId: sessionId },
+      orderBy: { createdAt: 'desc' },
+      take: 40,
+    });
+    const messages = recent.reverse().map((message) => ({
+      role: message.role,
+      content: message.content,
+      createdAt: message.createdAt,
+    }));
+    const latest = messages.at(-1);
+    const fresh =
+      Boolean(session.handoffSummary) &&
+      session.handoffSummaryAt != null &&
+      latest != null &&
+      latest.createdAt.getTime() <= session.handoffSummaryAt.getTime();
+    return {
+      needsAttention: session.needsAttention,
+      isAiActive: session.isAiActive,
+      handoffSummary: session.handoffSummary,
+      fresh,
+      messages,
+    };
+  }
+
+  saveHandoffSummary(sessionId: string, summary: string, through: Date) {
+    return this.prisma.chatSession.update({
+      where: { id: sessionId },
+      data: { handoffSummary: summary, handoffSummaryAt: through },
+    });
+  }
+
   findMessages(chatSessionId: string) {
     return this.prisma.message.findMany({
       where: { chatSessionId },
@@ -350,6 +396,8 @@ export class ChatService {
       needsAttention: session.needsAttention,
       attentionReason: session.attentionReason,
       attentionAt: session.attentionAt?.toISOString() ?? null,
+      handoffSummary: session.handoffSummary,
+      handoffSummaryAt: session.handoffSummaryAt?.toISOString() ?? null,
     };
   }
 

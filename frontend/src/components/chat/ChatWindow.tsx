@@ -31,6 +31,7 @@ type ChatWindowProps = {
   onClearAttention: () => void;
   pendingAction: PendingAction | null;
   actionError: string | null;
+  summaryStatus?: 'idle' | 'loading' | 'error';
   onSend: (content: string) => void;
   onTyping: () => void;
   assistantTyping: boolean;
@@ -62,6 +63,7 @@ export function ChatWindow({
   onClearAttention,
   pendingAction,
   actionError,
+  summaryStatus = 'idle',
   onSend,
   onTyping,
   assistantTyping,
@@ -105,6 +107,7 @@ export function ChatWindow({
 
   const resolved = conversationStatus(conversation) === 'resolved';
   const needsAttention = !resolved && Boolean(conversation.needsAttention);
+  const summaryLoading = summaryStatus === 'loading' && !conversation.handoffSummary;
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -221,28 +224,48 @@ export function ChatWindow({
       {needsAttention ? (
         <div
           role="alert"
-          className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--hera-border)] bg-[var(--hera-alert-soft)] px-4 py-2 sm:px-5"
+          className="border-b border-[var(--hera-border)] bg-[var(--hera-alert-soft)] px-4 py-2 sm:px-5"
         >
-          <p className="flex min-w-0 flex-1 items-center gap-2 text-xs text-[var(--hera-alert-strong)]">
-            <AlertTriangle size={15} className="shrink-0 text-[var(--hera-alert)]" aria-hidden="true" />
-            <span className="min-w-0">
-              <span className="font-semibold">Requiere atención</span>
-              {conversation.attentionReason ? `: ${conversation.attentionReason}` : ''}
-              {conversation.attentionAt ? (
-                <span className="opacity-80"> · {formatTime(conversation.attentionAt)}</span>
-              ) : null}
-            </span>
-          </p>
-          <button
-            type="button"
-            onClick={onClearAttention}
-            disabled={pendingAction === 'clearAttention'}
-            aria-label="Marcar alerta como atendida"
-            className={`flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[var(--hera-alert)] px-3 text-xs font-semibold text-[var(--hera-on-alert)] transition hover:opacity-90 disabled:cursor-wait disabled:opacity-60 ${focusRing}`}
-          >
-            <CheckCircle2 size={14} aria-hidden="true" />
-            Atendido
-          </button>
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+            <p className="flex min-w-0 flex-1 items-center gap-2 text-xs text-[var(--hera-alert-strong)]">
+              <AlertTriangle size={15} className="shrink-0 text-[var(--hera-alert)]" aria-hidden="true" />
+              <span className="min-w-0">
+                <span className="font-semibold">Requiere atención</span>
+                {conversation.attentionReason ? `: ${conversation.attentionReason}` : ''}
+                {conversation.attentionAt ? (
+                  <span className="opacity-80"> · {formatTime(conversation.attentionAt)}</span>
+                ) : null}
+              </span>
+            </p>
+            <button
+              type="button"
+              onClick={onClearAttention}
+              disabled={pendingAction === 'clearAttention'}
+              aria-label="Marcar alerta como atendida"
+              className={`flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[var(--hera-alert)] px-3 text-xs font-semibold text-[var(--hera-on-alert)] transition hover:opacity-90 disabled:cursor-wait disabled:opacity-60 ${focusRing}`}
+            >
+              <CheckCircle2 size={14} aria-hidden="true" />
+              Atendido
+            </button>
+          </div>
+          {conversation.handoffSummary ? (
+            <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-[var(--hera-text)]">
+              {conversation.handoffSummary}
+            </p>
+          ) : summaryLoading ? (
+            <p className="mt-1 text-xs text-[var(--hera-alert-strong)]">Armando el resumen…</p>
+          ) : null}
+        </div>
+      ) : !conversation.isAiActive && (conversation.handoffSummary || summaryLoading) ? (
+        <div className="border-b border-[var(--hera-border)] bg-[var(--hera-surface-soft)] px-4 py-2 sm:px-5">
+          <p className="text-xs font-semibold text-[var(--hera-muted)]">Resumen para secretaría</p>
+          {conversation.handoffSummary ? (
+            <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-[var(--hera-text)]">
+              {conversation.handoffSummary}
+            </p>
+          ) : (
+            <p className="mt-1 text-xs text-[var(--hera-muted)]">Armando el resumen…</p>
+          )}
         </div>
       ) : null}
 

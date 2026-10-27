@@ -329,6 +329,12 @@ export function ChatSidebar({
                       </p>
                     ) : null}
 
+                    {conversation.handoffSummary && (needsAttention || !conversation.isAiActive) ? (
+                      <p className="mt-1 line-clamp-2 text-[12px] leading-4 text-[var(--hera-text)]">
+                        {conversation.handoffSummary}
+                      </p>
+                    ) : null}
+
                     <p className="mt-1 truncate text-[13px] leading-[18px] text-[var(--hera-muted)]">
                       {conversation.lastMessage || 'Sin mensajes todavía'}
                     </p>
