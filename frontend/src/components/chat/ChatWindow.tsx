@@ -256,17 +256,6 @@ export function ChatWindow({
             <p className="mt-1 text-xs text-[var(--hera-alert-strong)]">Armando el resumen…</p>
           ) : null}
         </div>
-      ) : !conversation.isAiActive && (conversation.handoffSummary || summaryLoading) ? (
-        <div className="border-b border-[var(--hera-border)] bg-[var(--hera-surface-soft)] px-4 py-2 sm:px-5">
-          <p className="text-xs font-semibold text-[var(--hera-muted)]">Resumen para secretaría</p>
-          {conversation.handoffSummary ? (
-            <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-[var(--hera-text)]">
-              {conversation.handoffSummary}
-            </p>
-          ) : (
-            <p className="mt-1 text-xs text-[var(--hera-muted)]">Armando el resumen…</p>
-          )}
-        </div>
       ) : null}
 
       <p

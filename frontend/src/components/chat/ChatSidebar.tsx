@@ -329,7 +329,7 @@ export function ChatSidebar({
                       </p>
                     ) : null}
 
-                    {conversation.handoffSummary && (needsAttention || !conversation.isAiActive) ? (
+                    {needsAttention && conversation.handoffSummary ? (
                       <p className="mt-1 line-clamp-2 text-[12px] leading-4 text-[var(--hera-text)]">
                         {conversation.handoffSummary}
                       </p>

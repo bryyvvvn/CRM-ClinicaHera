@@ -316,7 +316,7 @@ export function ChatLayout({ searchQuery }: ChatLayoutProps) {
     if (!selected) {
       return;
     }
-    const wantsBriefing = Boolean(selected.needsAttention) || !selected.isAiActive;
+    const wantsBriefing = Boolean(selected.needsAttention);
     if (!wantsBriefing) {
       return;
     }
@@ -346,7 +346,7 @@ export function ChatLayout({ searchQuery }: ChatLayoutProps) {
         setSummaryState({ id: selected.id, status: 'error' });
       });
     return () => controller.abort();
-  }, [selected?.id, selected?.needsAttention, selected?.isAiActive, selected?.lastMessage]);
+  }, [selected?.id, selected?.needsAttention, selected?.lastMessage]);
 
   const handleSelect = (id: string) => {
     setSelectedId(id);

@@ -98,8 +98,10 @@ export class AiService {
     if (!source) {
       return null;
     }
-    const wanted = source.needsAttention || !source.isAiActive;
-    if (!wanted || source.fresh) {
+    if (!source.needsAttention) {
+      return null;
+    }
+    if (source.fresh) {
       return source.handoffSummary;
     }
     const latest = source.messages.at(-1);

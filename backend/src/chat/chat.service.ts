@@ -106,6 +106,8 @@ export class ChatService {
         needsAttention: false,
         attentionReason: null,
         attentionAt: null,
+        handoffSummary: null,
+        handoffSummaryAt: null,
       },
     });
     return { ok: true, session: updated };
@@ -169,13 +171,21 @@ export class ChatService {
     if (
       !session.needsAttention &&
       !session.attentionReason &&
-      !session.attentionAt
+      !session.attentionAt &&
+      !session.handoffSummary &&
+      !session.handoffSummaryAt
     ) {
       return { ok: true, session };
     }
     const updated = await this.prisma.chatSession.update({
       where: { id: sessionId },
-      data: { needsAttention: false, attentionReason: null, attentionAt: null },
+      data: {
+        needsAttention: false,
+        attentionReason: null,
+        attentionAt: null,
+        handoffSummary: null,
+        handoffSummaryAt: null,
+      },
     });
     return { ok: true, session: updated };
   }
