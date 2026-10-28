@@ -554,6 +554,7 @@ export class AiService {
         fecha_texto: fechaTexto(fecha),
         cantidad: horas.length,
         horas,
+        duracion: slots.find((slot) => slot.duracion)?.duracion,
         profesional: slots[0]?.nombre_profesional,
       };
     }

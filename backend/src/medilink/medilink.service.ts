@@ -149,7 +149,6 @@ export class MedilinkService {
       query.id_profesional ??
       this.optionalNumber('MEDILINK_DEFAULT_PROFESIONAL_ID') ??
       (await this.resolveProfesionalId({}));
-    const duracion = query.duracion ?? DEFAULT_DURATION;
     const { baseUrl } = this.credentials();
     const hosts = [...new Set([this.writeBaseUrl(), baseUrl])];
     const sucursales = query.id_sucursal
@@ -170,7 +169,6 @@ export class MedilinkService {
               {
                 id_sucursal: { eq: sucursalId },
                 fecha: { eq: query.fecha },
-                duracion: { eq: duracion },
                 id_dentista: { eq: profesionalId },
                 id_profesional: { eq: profesionalId },
               },
@@ -197,7 +195,7 @@ export class MedilinkService {
               baseUrl: host,
             },
           );
-          collected.push(...flattenDentistAgenda(grid, query.fecha, profesionalId, duracion));
+          collected.push(...flattenDentistAgenda(grid, query.fecha, profesionalId));
         } catch (error) {
           this.logger.warn(
             `GET agenda dentista=${profesionalId} sucursal=${sucursalId} falló (${
@@ -209,7 +207,10 @@ export class MedilinkService {
     }
 
     const ocupadas = await this.horasOcupadas(query.fecha, profesionalId, hosts);
-    return uniqueCupos(collected).filter((slot) => !ocupadas.has(slot.hora_inicio ?? ''));
+    const dia = isoDia(query.fecha);
+    return uniqueCupos(collected).filter(
+      (slot) => isoDia(slot.fecha) === dia && !ocupadas.has(slot.hora_inicio ?? ''),
+    );
   }
 
   /**
@@ -285,7 +286,20 @@ export class MedilinkService {
       sucursalId,
       profesionalId,
     );
-    const duracion = input.duracion ?? DEFAULT_DURATION;
+    const hora = normalizeTime(input.hora_inicio);
+    const cupos = await this.getAgenda({
+      fecha: input.fecha,
+      id_sucursal: sucursalId,
+      id_profesional: profesionalId,
+    });
+    const cupo = cupos.find((slot) => (slot.hora_inicio ?? '').slice(0, 5) === hora.slice(0, 5));
+    if (!cupo) {
+      throw new HttpException(
+        `No hay cupo el ${input.fecha} a las ${hora} con ese profesional. Llama verCupos para esa fecha y ofrece solo las horas que devuelva. Si no hay ninguna, dilo y ofrece el día más cercano.`,
+        409,
+      );
+    }
+    const duracion = cupo.duracion ?? input.duracion ?? DEFAULT_DURATION;
     const body: Record<string, number | string> = {
       id_profesional: profesionalId,
       id_dentista: profesionalId,
@@ -294,7 +308,7 @@ export class MedilinkService {
       id_sillon: sillonId,
       id_paciente: paciente.id,
       fecha: input.fecha,
-      hora_inicio: normalizeTime(input.hora_inicio),
+      hora_inicio: hora,
       duracion,
       comentario: input.comentario ?? 'Agendada por WhatsApp',
     };
@@ -945,11 +959,20 @@ function uniqueCupos(items: MedilinkCupo[]): MedilinkCupo[] {
   );
 }
 
+function isoDia(value: string | undefined): string {
+  const text = value?.trim() ?? '';
+  const dmy = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(text);
+  if (dmy) {
+    return `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
+  }
+  const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(text);
+  return iso ? `${iso[1]}-${iso[2]}-${iso[3]}` : '';
+}
+
 function flattenDentistAgenda(
   payload: unknown,
   fecha: string,
   idProfesional: number,
-  duracion: number,
 ): MedilinkCupo[] {
   const root =
     payload && typeof payload === 'object' && 'data' in payload
@@ -966,24 +989,36 @@ function flattenDentistAgenda(
 
   const slots: MedilinkCupo[] = [];
   for (const [day, dayValue] of Object.entries(fechas)) {
-    if (day !== fecha && !day.includes(fecha.slice(8))) {
+    if (isoDia(day) !== isoDia(fecha)) {
       continue;
     }
-    for (const [hora, slot] of Object.entries(dayValue.horas ?? {})) {
-      const free = Object.entries(slot.sillones ?? {}).some(
-        ([key, value]) => key !== 'Sobrecupo' && value === true,
-      );
-      if (free) {
-        slots.push({
-          fecha: day,
-          hora_inicio: hora,
-          duracion,
-          id_profesional: idProfesional,
-        });
-      }
-    }
+    const libres = Object.entries(dayValue.horas ?? {})
+      .filter(([, slot]) =>
+        Object.entries(slot.sillones ?? {}).some(
+          ([key, value]) => key !== 'Sobrecupo' && value === true,
+        ),
+      )
+      .map(([hora]) => hora)
+      .sort();
+    libres.forEach((hora, index) => {
+      const siguiente = toMinutes(libres[index + 1]);
+      const anterior = toMinutes(libres[index - 1]);
+      const actual = toMinutes(hora);
+      const gap =
+        actual !== undefined && siguiente !== undefined
+          ? siguiente - actual
+          : actual !== undefined && anterior !== undefined
+            ? actual - anterior
+            : DEFAULT_DURATION;
+      slots.push({
+        fecha: isoDia(day),
+        hora_inicio: hora,
+        duracion: gap > 0 ? gap : DEFAULT_DURATION,
+        id_profesional: idProfesional,
+      });
+    });
   }
-  return slots.length ? slots : [];
+  return slots;
 }
 
 function asOptionalString(value: unknown): string | undefined {

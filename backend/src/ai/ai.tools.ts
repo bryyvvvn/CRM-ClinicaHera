@@ -49,7 +49,10 @@ export const AI_TOOLS: AiToolDefinition[] = [
           nombre_profesional: { type: 'string', description: 'Nombre y apellido, sin Dr./Dra.' },
           id_profesional: { type: 'number', description: 'Solo si lo sacaste de verProfesionales o verCitas' },
           id_sucursal: { type: 'number', description: 'id de la lista de sucursales del prompt' },
-          duracion: { type: 'number', description: 'Minutos; por defecto 30' },
+          duracion: {
+            type: 'number',
+            description: 'No la envíes. La duración la trae la agenda.',
+          },
         },
         required: ['fecha'],
       },
@@ -87,7 +90,10 @@ export const AI_TOOLS: AiToolDefinition[] = [
           id_profesional: { type: 'number' },
           id_sucursal: { type: 'number', description: 'id de la lista de sucursales del prompt' },
           comentario: { type: 'string', description: 'Motivo: <motivo en palabras del paciente>' },
-          duracion: { type: 'number' },
+          duracion: {
+            type: 'number',
+            description: 'No la envíes. La cita usa la duración del cupo.',
+          },
           reemplazo: {
             type: 'boolean',
             description: 'true solo cuando reemplaza una cita vigente por cambio de sucursal',
