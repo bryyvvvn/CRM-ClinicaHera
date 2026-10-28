@@ -279,27 +279,29 @@ export class MedilinkService {
       input.id_estado ??
       this.optionalNumber('MEDILINK_ESTADO_NUEVA_CITA') ??
       (await this.findEstadoId('no confirmado', false));
-    const tratamientoId =
-      input.id_atencion ??
-      (input.nueva_atencion
-        ? await this.createTratamiento(paciente.id, sucursalId, profesionalId)
-        : (await this.latestOpenAtencionId(paciente.id)) ??
-          (await this.createTratamiento(paciente.id, sucursalId, profesionalId)));
+    const tratamientoId = await this.resolveTratamientoId(
+      input,
+      paciente.id,
+      sucursalId,
+      profesionalId,
+    );
     const duracion = input.duracion ?? DEFAULT_DURATION;
-    const body = {
+    const body: Record<string, number | string> = {
       id_profesional: profesionalId,
       id_dentista: profesionalId,
       id_sucursal: sucursalId,
       id_estado: estadoId,
       id_sillon: sillonId,
       id_paciente: paciente.id,
-      id_atencion: tratamientoId,
-      id_tratamiento: tratamientoId,
       fecha: input.fecha,
       hora_inicio: normalizeTime(input.hora_inicio),
       duracion,
       comentario: input.comentario ?? 'Agendada por WhatsApp',
     };
+    if (tratamientoId !== undefined) {
+      body.id_atencion = tratamientoId;
+      body.id_tratamiento = tratamientoId;
+    }
 
     this.logger.log(
       `MediLink POST /citas paciente=${paciente.id} fecha=${body.fecha} hora=${body.hora_inicio}`,
@@ -634,6 +636,34 @@ export class MedilinkService {
     return open?.id ?? pool[0]?.id;
   }
 
+  private async resolveTratamientoId(
+    input: CreateCitaInput,
+    idPaciente: number,
+    idSucursal: number,
+    idProfesional: number,
+  ): Promise<number | undefined> {
+    if (input.id_atencion !== undefined) {
+      return input.id_atencion;
+    }
+    if (!input.nueva_atencion) {
+      const abierta = await this.latestOpenAtencionId(idPaciente);
+      if (abierta !== undefined) {
+        return abierta;
+      }
+    }
+    try {
+      return await this.createTratamiento(idPaciente, idSucursal, idProfesional);
+    } catch (error) {
+      if (!this.isIncompatibleBranchError(error)) {
+        throw error;
+      }
+      this.logger.warn(
+        'La sucursal médica no abre el plan por Dentalink. La cita se crea igual en MediLink.',
+      );
+      return undefined;
+    }
+  }
+
   private async createTratamiento(
     idPaciente: number,
     idSucursal: number,
@@ -669,8 +699,15 @@ export class MedilinkService {
   }
 
   private isDentalBranchError(error: unknown): boolean {
+    return this.isIncompatibleBranchError(error);
+  }
+
+  private isIncompatibleBranchError(error: unknown): boolean {
+    if (error instanceof HttpException && error.getStatus() === 412) {
+      return true;
+    }
     const message = error instanceof Error ? error.message : String(error);
-    return /sucursal dental|412/i.test(message);
+    return /sucursal (m[eé]dica|dental)|no es compatible|412/i.test(message);
   }
 
   private async findEstadoId(needle: string, preferAnulacion: boolean): Promise<number> {
