@@ -540,22 +540,38 @@ export class AiService {
         );
       }
       // Sin fallback a otra sucursal: si no hay cupos donde se pidió, se informa así.
-      const slots = await this.medilinkService.getAgenda({
+      const agenda = await this.medilinkService.getAgenda({
         fecha,
         id_sucursal: idSucursal,
         id_profesional: idProfesional,
         duracion,
       });
-      const horas = [
-        ...new Set(slots.map((slot) => horaCorta(slot.hora_inicio)).filter(Boolean)),
-      ].filter((hora) => fecha !== todayInChile() || hora > nowHourInChile());
+      const horas = horasLibres(agenda.delDia, fecha);
+      if (horas.length) {
+        return {
+          fecha,
+          fecha_texto: fechaTexto(fecha),
+          cantidad: horas.length,
+          horas,
+          duracion: agenda.delDia.find((slot) => slot.duracion)?.duracion,
+          profesional: agenda.delDia[0]?.nombre_profesional,
+        };
+      }
+      const siguienteFecha = isoFecha(agenda.siguiente[0]?.fecha);
+      const siguienteHoras = siguienteFecha ? horasLibres(agenda.siguiente, siguienteFecha) : [];
       return {
         fecha,
         fecha_texto: fechaTexto(fecha),
-        cantidad: horas.length,
-        horas,
-        duracion: slots.find((slot) => slot.duracion)?.duracion,
-        profesional: slots[0]?.nombre_profesional,
+        cantidad: 0,
+        horas: [],
+        dia_sin_cupos: true,
+        siguiente_fecha: siguienteFecha,
+        siguiente_fecha_texto: siguienteFecha ? fechaTexto(siguienteFecha) : undefined,
+        siguiente_horas: siguienteHoras,
+        duracion: agenda.siguiente.find((slot) => slot.duracion)?.duracion,
+        aviso: siguienteFecha
+          ? `El ${fechaTexto(fecha)} no tiene horas. No digas que el sistema falló ni mandes a recepción. Ofrece el ${fechaTexto(siguienteFecha)} con siguiente_horas.`
+          : `El ${fechaTexto(fecha)} no tiene horas. No digas que el sistema falló ni mandes a recepción. Ofrece otro día.`,
       };
     }
 
@@ -935,6 +951,12 @@ function nowHourInChile(): string {
     minute: '2-digit',
     hour12: false,
   });
+}
+
+function horasLibres(slots: Array<{ hora_inicio?: string }>, fecha: string): string[] {
+  return [...new Set(slots.map((slot) => horaCorta(slot.hora_inicio)).filter(Boolean))].filter(
+    (hora) => fecha !== todayInChile() || hora > nowHourInChile(),
+  );
 }
 
 function isoFecha(fecha?: string): string | undefined {

@@ -144,7 +144,7 @@ export class MedilinkService {
     ).then(normalizeCupos);
   }
 
-  async getAgenda(query: GetAgendaQuery): Promise<MedilinkCupo[]> {
+  async getAgenda(query: GetAgendaQuery): Promise<{ delDia: MedilinkCupo[]; siguiente: MedilinkCupo[] }> {
     const profesionalId =
       query.id_profesional ??
       this.optionalNumber('MEDILINK_DEFAULT_PROFESIONAL_ID') ??
@@ -208,9 +208,23 @@ export class MedilinkService {
 
     const ocupadas = await this.horasOcupadas(query.fecha, profesionalId, hosts);
     const dia = isoDia(query.fecha);
-    return uniqueCupos(collected).filter(
+    const todos = uniqueCupos(collected);
+    const delDia = todos.filter(
       (slot) => isoDia(slot.fecha) === dia && !ocupadas.has(slot.hora_inicio ?? ''),
     );
+    const siguienteFecha = todos
+      .map((slot) => isoDia(slot.fecha))
+      .filter((fecha) => fecha && fecha > dia)
+      .sort()[0];
+    let siguiente: MedilinkCupo[] = [];
+    if (siguienteFecha) {
+      const ocupadasSiguiente = await this.horasOcupadas(siguienteFecha, profesionalId, hosts);
+      siguiente = todos.filter(
+        (slot) =>
+          isoDia(slot.fecha) === siguienteFecha && !ocupadasSiguiente.has(slot.hora_inicio ?? ''),
+      );
+    }
+    return { delDia, siguiente };
   }
 
   /**
@@ -287,15 +301,22 @@ export class MedilinkService {
       profesionalId,
     );
     const hora = normalizeTime(input.hora_inicio);
-    const cupos = await this.getAgenda({
+    const agenda = await this.getAgenda({
       fecha: input.fecha,
       id_sucursal: sucursalId,
       id_profesional: profesionalId,
     });
-    const cupo = cupos.find((slot) => (slot.hora_inicio ?? '').slice(0, 5) === hora.slice(0, 5));
+    const cupo = agenda.delDia.find((slot) => (slot.hora_inicio ?? '').slice(0, 5) === hora.slice(0, 5));
     if (!cupo) {
+      const siguienteFecha = isoDia(agenda.siguiente[0]?.fecha);
+      const horas = agenda.siguiente
+        .map((slot) => (slot.hora_inicio ?? '').slice(0, 5))
+        .filter(Boolean)
+        .join(', ');
       throw new HttpException(
-        `No hay cupo el ${input.fecha} a las ${hora} con ese profesional. Llama verCupos para esa fecha y ofrece solo las horas que devuelva. Si no hay ninguna, dilo y ofrece el día más cercano.`,
+        siguienteFecha
+          ? `El ${input.fecha} no tiene la hora ${hora}. No digas que el sistema falló y no mandes a recepción. El día con horas es ${siguienteFecha}. Horas: ${horas}. Ofrece ese día y, si confirma, llama crearCita con esa fecha.`
+          : `El ${input.fecha} a las ${hora} no está en la agenda. No digas que el sistema falló y no mandes a recepción. Llama verCupos y ofrece solo las horas que devuelva.`,
         409,
       );
     }
