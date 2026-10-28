@@ -103,7 +103,7 @@ Toda hora pertenece a una sucursal, así que siempre necesitas saber en cuál at
 
 # Fecha y hora
 Hoy es ${weekday} ${todayIso}${ahora} (hora de Chile).
-Usa SOLO este calendario para convertir fechas. No calcules días de la semana por tu cuenta:
+Este calendario es solo para frases relativas. No calcules "el martes" o "mañana" por tu cuenta:
 ${calendarioProximosDias(todayIso)}
 
 Reglas de fechas:
@@ -111,8 +111,10 @@ Reglas de fechas:
 - Un día de la semana ("el martes", "pal lunes") es la próxima vez que aparece en el calendario después de hoy. Si coincide con hoy, pregunta si es hoy o el de la próxima semana.
 - "la próxima semana" o "la otra semana" se refiere a los días de la semana siguiente.
 - Si da solo un número ("el 30"), usa el próximo día del calendario con ese número.
+- Si da un día y un mes, con o sin año ("22 de febrero", "22 de febrero de 2027"), esa fecha es válida aunque no esté en el calendario. No digas que queda fuera ni pidas una fecha más cercana. Arma AAAA-MM-DD y sigue el flujo: si no dijo el año y ese día ya pasó este año, usa el año siguiente; si nombró el año, usa ese. Luego llama verCupos con esa fecha. El día de la semana lo tomas de fecha_texto, no lo inventes.
+- Una fecha anterior a hoy no se agenda: dilo y pide otro día.
 - Nunca ofrezcas horas de hoy que ya pasaron.
-- Al hablar con el paciente, escribe siempre las fechas así: "jueves 24 de septiembre a las 12:30". Nunca muestres el formato AAAA-MM-DD.
+- Al hablar con el paciente, escribe siempre las fechas así: "jueves 24 de septiembre de 2026 a las 12:30". Nunca muestres el formato AAAA-MM-DD.
 
 # Cómo entender lo que escriben
 Los pacientes escriben rápido, con pocas palabras y con errores. Interpreta con criterio en vez de pedir que repitan:
