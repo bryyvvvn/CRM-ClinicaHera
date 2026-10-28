@@ -746,15 +746,26 @@ export class MedilinkService {
   }
 
   private async findEstadoId(needle: string, preferAnulacion: boolean): Promise<number> {
+    const matches = (items: MedilinkEstadoCita[]) =>
+      items
+        .filter((item) => item.anulacion !== 1 && fold(item.nombre ?? '').includes(fold(needle)))
+        .map((item) => item.id);
     const ids = preferAnulacion
       ? await this.findAnulacionEstadoIds()
-      : (await this.writableEstados())
-          .filter((item) => item.anulacion !== 1 && fold(item.nombre ?? '').includes(fold(needle)))
-          .map((item) => item.id);
-    if (!ids[0]) {
-      throw new HttpException(`No se encontró un estado de cita para "${needle}"`, 422);
+      : matches(await this.writableEstados());
+    if (ids[0]) {
+      return ids[0];
     }
-    return ids[0];
+    // "No confirmado" viene reservado, pero MediLink acepta ese id al crear la cita.
+    if (!preferAnulacion) {
+      const reserved = matches(
+        (await this.listEstadosCita()).filter((item) => item.habilitado !== 0),
+      );
+      if (reserved[0]) {
+        return reserved[0];
+      }
+    }
+    throw new HttpException(`No se encontró un estado de cita para "${needle}"`, 422);
   }
 
   private async findAnulacionEstadoIds(): Promise<number[]> {
